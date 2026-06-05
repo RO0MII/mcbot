@@ -5,7 +5,7 @@ const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
 
 // ---- Settings ----
-const DEFAULT_IP = 'localhost';   // Used when you just press Enter on the IP prompt
+const DEFAULT_IP = 'play.bananasmp.net';   // Used when you just press Enter on the IP prompt
 const DEFAULT_PORT = 25565;       // Default Minecraft port
 const VERSION = '1.20.1';         // Fixed version = skip the auto-detect ping round-trip, so the FIRST join is fast. Set false to auto-detect.
 const AUTO_RECONNECT = true;      // Keep retrying while the server boots (Aternos)
