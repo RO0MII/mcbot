@@ -1,6 +1,8 @@
 const readline = require('readline');
+const fs = require('fs');
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
+const { Vec3 } = require('vec3');
 
 // ---- Settings ----
 const DEFAULT_IP = 'localhost';   // Used when you just press Enter on the IP prompt
@@ -10,6 +12,11 @@ const AUTO_RECONNECT = true;      // Keep retrying while the server boots (Atern
 const RECONNECT_DELAY = 5000;     // ms between retries
 const JOIN_TIMEOUT = 30000;       // ms to wait for a join before giving up and retrying (fixes hangs)
 const AFK_INTERVAL = 8000;        // ms between anti-AFK actions when !afk is on
+const TOOL_BREAK_BUFFER = 5;      // !oneblock won't use a tool with this many uses (or fewer) left — keeps it from breaking
+const MINE_REACH = 4.5;           // blocks: how close the bot must be to dig the target
+const GAME_DELAY_MIN = 6000;      // !games — min delay before auto-answering a chat game (ms)
+const GAME_DELAY_MAX = 8000;      // !games — max delay before auto-answering a chat game (ms)
+const WORDLIST_PATH = '/usr/share/dict/words'; // dictionary used to solve "unscramble" games
 
 // Terminal colors (truecolor for rich, vivid output)
 const rgb = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
@@ -26,6 +33,40 @@ const LOGO_COLORS = [
   rgb(80, 230, 255), rgb(95, 200, 255), rgb(120, 170, 255),
   rgb(160, 140, 255), rgb(200, 120, 250), rgb(240, 110, 220)
 ];
+
+// ---- UI helpers (consistent, colorful console output) ----
+const BOX_W = 50; // inner width of framed boxes (chars between the borders)
+
+// A single status line: colored icon + label + message. Used for all bot replies.
+//   ui.ok('Anti-AFK ON', 'moving every 8s')  →  "  ✔ Anti-AFK ON — moving every 8s"
+function line(icon, color, label, msg = '') {
+  const tail = msg ? ` ${c.gray}${msg}${c.reset}` : '';
+  console.log(`  ${color}${icon}${c.reset} ${color}${c.bold}${label}${c.reset}${tail}`);
+}
+const ui = {
+  ok:   (l, m) => line('✔', c.green,  l, m),
+  info: (l, m) => line('●', c.cyan,   l, m),
+  warn: (l, m) => line('▲', c.orange, l, m),
+  err:  (l, m) => line('✘', c.red,    l, m),
+};
+
+// Draw a rounded, colored box. `title` is the header; `rows` is [name, desc] pairs.
+function drawBox(title, rows, footer) {
+  const bar = '─'.repeat(BOX_W);
+  const fit = (s, w) => (s.length > w ? s.slice(0, w) : s.padEnd(w));
+  console.log('');
+  console.log(`  ${c.blue}╭${bar}╮${c.reset}`);
+  console.log(`  ${c.blue}│${c.reset} ${c.bold}${c.magenta}${fit(title, BOX_W - 1)}${c.reset}${c.blue}│${c.reset}`);
+  console.log(`  ${c.blue}├${bar}┤${c.reset}`);
+  for (const [name, desc] of rows) {
+    const n = fit(name, 16);                 // command column
+    const d = fit(desc, BOX_W - 16 - 2);     // description column (1 lead + 1 gap)
+    console.log(`  ${c.blue}│${c.reset} ${c.yellow}${n}${c.reset} ${c.white}${d}${c.reset}${c.blue}│${c.reset}`);
+  }
+  console.log(`  ${c.blue}╰${bar}╯${c.reset}`);
+  if (footer) console.log(`  ${c.gray}${footer}${c.reset}`);
+  console.log('');
+}
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const ask = (q) => new Promise((res) => rl.question(q, res));
@@ -94,8 +135,10 @@ async function main() {
   // These are handled here in the console and are NEVER sent to server chat.
   let afkTimer = null;   // setInterval handle while anti-AFK is on
   let following = null;  // username we're currently following, or null
+  let mining = null;     // { pos: Vec3 } while !oneblock is running, or null
+  let gameMode = false;  // true while !games auto-answering is on
 
-  const notConnected = `  ${c.yellow}Not connected yet — wait for "JOINED THE SERVER".${c.reset}`;
+  const notConnected = `  ${c.orange}▲${c.reset} ${c.orange}${c.bold}Not connected${c.reset} ${c.gray}— wait for "JOINED THE SERVER".${c.reset}`;
 
   function stopAfk() {
     if (afkTimer) { clearInterval(afkTimer); afkTimer = null; }
@@ -124,6 +167,232 @@ async function main() {
     try { bot.pathfinder.setGoal(null); } catch (_) {}
   }
 
+  function stopMining() {
+    mining = null;
+    try { bot.stopDigging(); } catch (_) {}
+    try { bot.pathfinder.setGoal(null); } catch (_) {}
+  }
+
+  // Pick the FASTEST tool for this block that still has more than TOOL_BREAK_BUFFER
+  // uses left — so !oneblock never digs with a tool that's about to break.
+  // Returns { tool, skipped } where `tool` may be null (= dig with bare hand).
+  function pickSafeTool(block) {
+    const effects = bot.entity.effects;
+    let bestTool = null;
+    let fastest = Number.MAX_VALUE;
+    let skipped = 0;
+    for (const item of bot.inventory.items()) {
+      // Durability left = maxDurability - durabilityUsed. Items with no
+      // maxDurability (e.g. a torch) never wear out, so they're always safe.
+      if (item.maxDurability) {
+        const left = item.maxDurability - (item.durabilityUsed || 0);
+        if (left <= TOOL_BREAK_BUFFER) { skipped++; continue; } // about to break — skip it
+      }
+      const enchants = item.nbt ? require('prismarine-nbt').simplify(item.nbt).Enchantments : [];
+      const digTime = block.digTime(item.type, false, false, false, enchants, effects);
+      if (digTime < fastest) { fastest = digTime; bestTool = item; }
+    }
+    return { tool: bestTool, skipped };
+  }
+
+  // Continuously mine the block at `mining.pos`: walk into reach, equip a safe
+  // tool, dig, then wait for it to come back (oneblock-style) and repeat.
+  async function mineLoop() {
+    while (mining) {
+      const pos = mining.pos;
+      const block = bot.blockAt(pos);
+
+      // Nothing to mine yet (air / not loaded) — wait for it to (re)appear.
+      if (!block || !block.diggable || block.name === 'air') {
+        await new Promise((r) => setTimeout(r, 500));
+        continue;
+      }
+
+      // Walk into digging range if we're too far.
+      if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > MINE_REACH) {
+        try {
+          await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
+        } catch (_) {
+          if (!mining) break;
+          ui.warn('Can\'t reach block', 'retrying in 2s');
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
+        }
+      }
+      if (!mining) break;
+
+      const { tool, skipped } = pickSafeTool(block);
+      try {
+        if (tool) await bot.equip(tool, 'hand');
+        else await bot.unequip('hand').catch(() => {}); // no safe tool — use bare hand
+      } catch (_) {}
+
+      const toolName = tool ? tool.name : 'bare hand';
+      const note = skipped ? `${toolName} · skipped ${skipped} worn tool${skipped > 1 ? 's' : ''}` : toolName;
+      ui.info(`Mining ${block.name}`, note);
+
+      try {
+        await bot.dig(block, true);
+        ui.ok('Block mined', `x=${pos.x} y=${pos.y} z=${pos.z}`);
+      } catch (_) {
+        if (!mining) break;
+      }
+      await new Promise((r) => setTimeout(r, 400)); // small breather before the next pass
+    }
+  }
+
+  // ---- Chat-game auto-answering (!games) ----
+  // Lazily-built map of "sorted letters" -> [real words] for unscramble games,
+  // plus a flat list of all dictionary words for fill-in-the-blank matching.
+  let anagramMap = null;
+  let wordList = null;
+  function loadAnagrams() {
+    if (anagramMap) return anagramMap;
+    anagramMap = new Map();
+    wordList = [];
+    try {
+      const words = fs.readFileSync(WORDLIST_PATH, 'utf8').split('\n');
+      for (let w of words) {
+        w = w.trim().toLowerCase();
+        if (!w || w.length < 2 || !/^[a-z]+$/.test(w)) continue; // skip names/apostrophes
+        wordList.push(w);
+        const key = w.split('').sort().join('');
+        const list = anagramMap.get(key);
+        if (list) { if (!list.includes(w)) list.push(w); }
+        else anagramMap.set(key, [w]);
+      }
+    } catch (_) { /* no dictionary — unscramble/fill-blank just won't solve */ }
+    return anagramMap;
+  }
+
+  // Fill-in-the-blank: turn a masked token like "app_e" or "c_t" into a regex
+  // and find the dictionary word(s) that fit. Blanks may be _ . * or -.
+  function solveFillBlank(token) {
+    loadAnagrams();
+    if (!wordList) return null;
+    const masked = token.toLowerCase().replace(/[^a-z_.*-]/g, '');
+    if (!/[_.*-]/.test(masked) || !/[a-z]/.test(masked)) return null; // needs a blank AND a letter
+    const re = new RegExp('^' + masked.replace(/[_.*-]/g, '[a-z]') + '$');
+    // Prefer the most common-ish (shortest then alphabetical is a decent proxy).
+    const hits = wordList.filter((w) => w.length === masked.length && re.test(w));
+    return hits.length ? hits[0] : null;
+  }
+
+  // Small built-in trivia table for the few question types a bot can answer offline.
+  // Add your own "question substring": "answer" pairs here — first match wins.
+  const TRIVIA = {
+    'capital of france': 'Paris',
+    'capital of japan': 'Tokyo',
+    'capital of italy': 'Rome',
+    'capital of germany': 'Berlin',
+    'capital of england': 'London',
+    'capital of spain': 'Madrid',
+    'capital of russia': 'Moscow',
+    'capital of china': 'Beijing',
+    'capital of canada': 'Ottawa',
+    'capital of australia': 'Canberra',
+    'capital of sri lanka': 'Sri Jayawardenepura Kotte',
+    'largest planet': 'Jupiter',
+    'smallest planet': 'Mercury',
+    'red planet': 'Mars',
+    'closest planet to the sun': 'Mercury',
+    'how many continents': '7',
+    'how many days in a week': '7',
+    'how many colors in a rainbow': '7',
+    'chemical symbol for water': 'H2O',
+    'chemical symbol for gold': 'Au',
+    'fastest land animal': 'Cheetah',
+    'largest ocean': 'Pacific',
+    'tallest mountain': 'Mount Everest',
+    'longest river': 'Nile',
+  };
+  function solveTrivia(low) {
+    for (const q in TRIVIA) if (low.includes(q)) return TRIVIA[q];
+    return null;
+  }
+  function evalMath(expr) {
+    const clean = expr.replace(/x/gi, '*').replace(/[^0-9+\-*/().\s]/g, '');
+    if (!clean.trim() || !/[0-9]/.test(clean)) return null;
+    try {
+      // eslint-disable-next-line no-new-func
+      const v = Function(`"use strict";return (${clean})`)();
+      if (typeof v === 'number' && isFinite(v)) {
+        return Number.isInteger(v) ? String(v) : String(Math.round(v * 1000) / 1000);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // Given a chat line, work out the answer to a game — or null if it's not one we solve.
+  // Returns { answer, kind } so the console can label what it solved.
+  function solveGame(msg) {
+    const text = msg.trim();
+    const low = text.toLowerCase();
+
+    // 1) Unscramble — "unscramble: ttacle" / "unscramble the word ttacle"
+    let m = low.match(/unscramble[^a-z0-9]*(?:the word[:\s]*)?([a-z]{3,})/);
+    if (m) {
+      const key = m[1].split('').sort().join('');
+      const hits = loadAnagrams().get(key);
+      // Prefer an answer that isn't the scrambled token itself.
+      const ans = hits && (hits.find((w) => w !== m[1]) || hits[0]);
+      if (ans) return { answer: ans, kind: 'unscramble' };
+    }
+
+    // 2) Math — "solve 5 + 3", "what is 12 x 4", "first to answer 7*8"
+    if (/\b(solve|what(?:'s| is)|answer|calculate|=)\b/.test(low) || /\d\s*[+\-*x/]\s*\d/.test(low)) {
+      const expr = text.match(/[-0-9+\-*x/().\s]*\d[-0-9+\-*x/().\s]*/i);
+      if (expr) {
+        const ans = evalMath(expr[0]);
+        if (ans !== null) return { answer: ans, kind: 'math' };
+      }
+    }
+
+    // 3) Type-the-word / retype — "first to type 'PINEAPPLE' wins" / "type: HELLO"
+    //    Also "retype this: <sentence>" / "repeat: <text>" / "copy this <text>".
+    m = text.match(/(?:retype|repeat|copy)(?:\s+this)?[:\s]+(.+)/i);
+    if (m && m[1].trim().length >= 2) return { answer: m[1].trim(), kind: 'retype' };
+    m = text.match(/type[^'"a-z0-9]*['"]([^'"]{2,})['"]/i)
+        || text.match(/type(?:\s+the\s+word)?[:\s]+([^\s.,!]{2,})/i);
+    if (m) {
+      // If the token has a hidden letter (e.g. "type c_t"), it's a fill-blank, not a literal.
+      if (/[_.*-]/.test(m[1])) {
+        const filled = solveFillBlank(m[1]);
+        if (filled) return { answer: filled, kind: 'fill-blank' };
+      }
+      return { answer: m[1], kind: 'type' };
+    }
+
+    // 4) Fill-in-the-blank — a token with hidden letters like "app_e" or "c_t".
+    m = text.match(/\b([a-z]*[_.*-][a-z_.*-]*)\b/i);
+    if (m) {
+      const ans = solveFillBlank(m[1]);
+      if (ans) return { answer: ans, kind: 'fill-blank' };
+    }
+
+    // 5) Trivia — a small built-in table of common questions (offline-safe).
+    const triv = solveTrivia(low);
+    if (triv) return { answer: triv, kind: 'trivia' };
+
+    return null;
+  }
+
+  // Schedule an answer to a detected game after a human-like random delay.
+  function maybeAnswerGame(msg) {
+    if (!gameMode || !bot || !bot.player) return;
+    const solved = solveGame(msg);
+    if (!solved) return;
+    const delay = GAME_DELAY_MIN + Math.floor(Math.random() * (GAME_DELAY_MAX - GAME_DELAY_MIN + 1));
+    ui.info(`Game: ${solved.kind}`, `answering "${solved.answer}" in ${(delay / 1000).toFixed(1)}s`);
+    setTimeout(() => {
+      if (!gameMode || !bot || !bot.player) return;
+      try {
+        bot.chat(solved.answer);
+        ui.ok('Answer sent', `${c.white}${solved.answer}`);
+      } catch (_) {}
+    }, delay);
+  }
+
   // Handle a `!command` typed in the console. Never touches server chat.
   function handleCommand(raw) {
     const parts = raw.slice(1).trim().split(/\s+/);
@@ -133,27 +402,47 @@ async function main() {
 
     switch (cmd) {
       case 'help':
-        console.log(`  ${c.magenta}${c.bold}Bot commands${c.reset} ${c.gray}(handled locally — not sent to the server):${c.reset}`);
-        console.log(`  ${c.yellow}!help${c.reset}            ${c.gray}Show this list${c.reset}`);
-        console.log(`  ${c.yellow}!afk on|off${c.reset}      ${c.gray}Toggle anti-AFK movement${c.reset}`);
-        console.log(`  ${c.yellow}!pos${c.reset}             ${c.gray}Show current coordinates${c.reset}`);
-        console.log(`  ${c.yellow}!health${c.reset}          ${c.gray}Show health & hunger${c.reset}`);
-        console.log(`  ${c.yellow}!players${c.reset}         ${c.gray}List online players${c.reset}`);
-        console.log(`  ${c.yellow}!follow <name>${c.reset}   ${c.gray}Follow a player${c.reset}`);
-        console.log(`  ${c.yellow}!stop${c.reset}            ${c.gray}Stop following${c.reset}`);
-        console.log(`  ${c.yellow}!quit${c.reset}            ${c.gray}Disconnect and exit${c.reset}`);
+        drawBox('  ⌘  BOT COMMANDS', [
+          ['!help', 'Show this command list'],
+          ['!afk on|off', 'Toggle anti-AFK movement'],
+          ['!games on|off', 'Auto-answer chat games'],
+          ['!pos', 'Show current coordinates'],
+          ['!health', 'Show health & hunger'],
+          ['!players', 'List online players'],
+          ['!follow <name>', 'Follow a player'],
+          ['!oneblock x y z', 'Mine a block on loop (tool-safe)'],
+          ['!oneblock stop', 'Stop one-block mining'],
+          ['!stop', 'Stop following / mining'],
+          ['!quit', 'Disconnect and exit'],
+        ], 'Handled locally — never sent to the server.  Bot auto-respawns on death.');
         break;
+
+      case 'games':
+      case 'game': {
+        const mode = arg.toLowerCase();
+        if (mode === 'on') {
+          gameMode = true;
+          loadAnagrams(); // warm the dictionary so the first answer isn't slow
+          ui.ok('Auto-games ON', `answering chat games in ${GAME_DELAY_MIN / 1000}-${GAME_DELAY_MAX / 1000}s`);
+        } else if (mode === 'off') {
+          gameMode = false;
+          ui.warn('Auto-games OFF', 'no longer answering chat games');
+        } else {
+          ui.err('Usage', 'type  !games on  or  !games off');
+        }
+        break;
+      }
 
       case 'afk': {
         const mode = arg.toLowerCase();
         if (mode === 'on') {
           startAfk();
-          console.log(`  ${c.green}● Anti-AFK ON${c.reset} ${c.gray}— moving every ${AFK_INTERVAL / 1000}s.${c.reset}`);
+          ui.ok('Anti-AFK ON', `moving every ${AFK_INTERVAL / 1000}s`);
         } else if (mode === 'off') {
           stopAfk();
-          console.log(`  ${c.yellow}● Anti-AFK OFF${c.reset}`);
+          ui.warn('Anti-AFK OFF', 'bot will sit still');
         } else {
-          console.log(`  ${c.red}Usage:${c.reset} ${c.yellow}!afk on${c.reset} ${c.gray}or${c.reset} ${c.yellow}!afk off${c.reset}`);
+          ui.err('Usage', 'type  !afk on  or  !afk off');
         }
         break;
       }
@@ -161,44 +450,74 @@ async function main() {
       case 'pos': {
         if (!connected) { console.log(notConnected); break; }
         const p = bot.entity.position;
-        console.log(`  ${c.cyan}● Position:${c.reset} ${c.white}x=${p.x.toFixed(1)} y=${p.y.toFixed(1)} z=${p.z.toFixed(1)}${c.reset}`);
+        ui.info('Position', `x=${p.x.toFixed(1)}  y=${p.y.toFixed(1)}  z=${p.z.toFixed(1)}`);
         break;
       }
 
       case 'health':
         if (!connected) { console.log(notConnected); break; }
-        console.log(`  ${c.pink}● Health:${c.reset} ${c.white}${(bot.health ?? 0).toFixed(0)}/20${c.reset}   ${c.orange}Hunger:${c.reset} ${c.white}${(bot.food ?? 0).toFixed(0)}/20${c.reset}`);
+        ui.info('Health', `❤ ${(bot.health ?? 0).toFixed(0)}/20    🍗 ${(bot.food ?? 0).toFixed(0)}/20`);
         break;
 
       case 'players': {
         if (!connected) { console.log(notConnected); break; }
         const names = Object.keys(bot.players);
-        console.log(`  ${c.blue}● Online (${names.length}):${c.reset} ${c.white}${names.join(', ')}${c.reset}`);
+        ui.info(`Online (${names.length})`, names.join(', '));
         break;
       }
 
       case 'follow': {
         if (!connected) { console.log(notConnected); break; }
-        if (!arg) { console.log(`  ${c.red}Usage:${c.reset} ${c.yellow}!follow <player>${c.reset}`); break; }
+        if (!arg) { ui.err('Usage', 'type  !follow <player>'); break; }
         const target = bot.players[arg];
         if (!target || !target.entity) {
-          console.log(`  ${c.red}● Can't see "${arg}".${c.reset} ${c.gray}They must be online and nearby.${c.reset}`);
+          ui.err(`Can't see "${arg}"`, 'they must be online and nearby');
           break;
         }
         following = arg;
         bot.pathfinder.setGoal(new goals.GoalFollow(target.entity, 2), true);
-        console.log(`  ${c.green}● Following ${c.white}${arg}${c.reset}${c.gray}. Type ${c.yellow}!stop${c.gray} to stop.${c.reset}`);
+        ui.ok(`Following ${arg}`, 'type !stop to stop');
+        break;
+      }
+
+      case 'oneblock':
+      case 'mine': {
+        if (!connected) { console.log(notConnected); break; }
+        // "!oneblock stop" turns mining off.
+        if (arg.toLowerCase() === 'stop' || arg.toLowerCase() === 'off') {
+          if (mining) { stopMining(); ui.warn('One-block mining OFF', 'stopped'); }
+          else ui.warn('Not mining', 'nothing to stop');
+          break;
+        }
+        // Accept "x y z" or "x,y,z"; default to the block the bot is standing on.
+        const nums = arg.split(/[\s,]+/).filter(Boolean).map(Number);
+        let x, y, z;
+        if (nums.length === 3 && nums.every((n) => !isNaN(n))) {
+          [x, y, z] = nums.map(Math.floor);
+        } else if (!arg) {
+          const p = bot.entity.position;
+          x = Math.floor(p.x); y = Math.floor(p.y) - 1; z = Math.floor(p.z);
+        } else {
+          ui.err('Usage', 'type  !oneblock <x y z>  or  !oneblock stop');
+          break;
+        }
+        stopFollow();   // can't follow and mine at once
+        stopMining();   // restart cleanly if already mining
+        mining = { pos: new Vec3(x, y, z) };
+        ui.ok('One-block mining ON', `target x=${x} y=${y} z=${z}  ·  !oneblock stop to stop`);
+        mineLoop().catch((e) => ui.err('Mining stopped', e.message || String(e)));
         break;
       }
 
       case 'stop':
-        stopFollow();
-        console.log(`  ${c.yellow}● Stopped following.${c.reset}`);
+        if (mining) { stopMining(); ui.warn('Stopped mining'); }
+        if (following) { stopFollow(); ui.warn('Stopped following'); }
+        if (!mining && !following) { stopFollow(); stopMining(); ui.warn('Nothing to stop'); }
         break;
 
       case 'quit':
       case 'exit':
-        console.log(`  ${c.yellow}Goodbye!${c.reset}`);
+        ui.ok('Goodbye!', 'disconnecting...');
         stopAfk();
         try { bot.quit(); } catch (_) {}
         rl.close();
@@ -206,7 +525,7 @@ async function main() {
         break;
 
       default:
-        console.log(`  ${c.red}● Unknown command:${c.reset} ${c.yellow}!${cmd}${c.reset} ${c.gray}— type ${c.yellow}!help${c.gray} for the list.${c.reset}`);
+        ui.err(`Unknown command  !${cmd}`, 'type !help to see all commands');
     }
   }
 
@@ -252,6 +571,7 @@ async function main() {
     // Show server chat
     bot.on('messagestr', (message) => {
       process.stdout.write(`\r  ${c.cyan}${c.bold}[CHAT]${c.reset} ${c.white}${message}${c.reset}\n`);
+      if (gameMode) maybeAnswerGame(message); // auto-answer chat games when !games is on
     });
 
     bot.on('kicked', (reason) => console.log(`  ${c.orange}●${c.reset} ${c.orange}${c.bold}Kicked:${c.reset} ${c.white}${reason}${c.reset}`));
@@ -267,6 +587,7 @@ async function main() {
 
     bot.on('end', () => {
       clearTimeout(watchdog);
+      if (mining) mining = null; // stop the mine loop; the old bot is gone
       if (!joined) {
         if (offline) {
           console.log(`  ${c.orange}●${c.reset} ${c.orange}${c.bold}Server offline${c.reset} ${c.gray}— not reachable right now.${c.reset}`);
