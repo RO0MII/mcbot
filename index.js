@@ -340,7 +340,7 @@ async function main() {
     }
 
     // 2) Math — "solve 5 + 3", "what is 12 x 4", "first to answer 7*8"
-    if (/\b(solve|what(?:'s| is)|answer|calculate|=)\b/.test(low) || /\d\s*[+\-*x/]\s*\d/.test(low)) {
+    if (/\b(solve|what(?:'s| is)|answer|calculate|=)\b/.test(low) || /\d\s*[+\-*x/]\s*-?\s*\d/.test(low)) {
       const expr = text.match(/[-0-9+\-*x/().\s]*\d[-0-9+\-*x/().\s]*/i);
       if (expr) {
         const ans = evalMath(expr[0]);
