@@ -18,7 +18,11 @@ It connects to any server, shows live in-game chat right in your terminal, and l
 
 - **Interactive login** — prompts for player name and server IP at startup.
 - **Live chat console** — see server chat in your terminal and type to chat back.
-- **Run commands** — start a message with `/` to send a Minecraft command.
+- **Bot commands (`!`)** — local control commands like `!afk`, `!follow`, `!pos` (handled in the console, **never sent to the server**).
+- **Run server commands** — start a message with `/` to send a Minecraft command.
+- **Anti-AFK** — `!afk on` makes the bot move slightly so it's never kicked for being idle.
+- **Auto-respawn** — the bot respawns by itself when it dies.
+- **Follow players** — `!follow <name>` walks the bot to a player using pathfinding.
 - **Auto-reconnect** — keeps retrying while the server boots (great for [Aternos](https://aternos.org/)).
 - **Join watchdog** — gives up and retries cleanly if a join hangs (default 30s).
 - **Fast first join** — version is pinned to `1.20.1` to skip the auto-detect ping.
@@ -60,13 +64,34 @@ You'll be asked for:
 1. **Player name** — the username the bot joins with.
 2. **Server IP** — `host` or `host:port`. Press **Enter** to use the default (`localhost:25565`).
 
-Once connected:
+Once connected, anything you type is routed by its first character:
 
-| Action            | How                                              |
-| ----------------- | ------------------------------------------------ |
-| Send a chat message | Type text and press **Enter**                  |
-| Run a command      | Start with `/` (e.g. `/gamemode creative`)      |
-| Quit               | Type `quit` / `exit`, or press **Ctrl+C**       |
+| You type            | Goes to            | Example                  |
+| ------------------- | ------------------ | ------------------------ |
+| Plain text          | Server chat        | `hello everyone`         |
+| `/` prefix          | Server command     | `/gamemode creative`     |
+| `!` prefix          | **Bot command** (local, never sent to the server) | `!afk on` |
+
+---
+
+## 🤖 Bot Commands
+
+These start with `!` and are handled by the bot in your console — they are **never sent to server chat**.
+
+| Command            | Description                                         |
+| ------------------ | --------------------------------------------------- |
+| `!help`            | Show the list of bot commands                       |
+| `!afk on` / `!afk off` | Toggle anti-AFK movement (swing / look / jump)  |
+| `!pos`             | Show the bot's current coordinates                  |
+| `!health`          | Show the bot's health and hunger                    |
+| `!players`         | List players currently online                       |
+| `!follow <name>`   | Follow a player (uses pathfinding)                  |
+| `!stop`            | Stop following                                      |
+| `!quit`            | Disconnect and exit                                 |
+
+> 💀 **Auto-respawn:** when the bot dies it respawns automatically — no command needed.
+
+You can also type `quit` / `exit` (without `!`) or press **Ctrl+C** to exit at any time.
 
 ---
 
@@ -98,6 +123,7 @@ auth: 'microsoft',
 
 - [Node.js](https://nodejs.org/)
 - [Mineflayer](https://github.com/PrismarineJS/mineflayer) `^4.20.1`
+- [mineflayer-pathfinder](https://github.com/PrismarineJS/mineflayer-pathfinder) `^2.4.5` (for `!follow`)
 
 ---
 
