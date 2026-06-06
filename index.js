@@ -16,7 +16,7 @@ const TOOL_BREAK_BUFFER = 5;      // !oneblock won't use a tool with this many u
 const MINE_REACH = 4.5;           // blocks: how close the bot must be to dig the target
 const GAME_DELAY_MIN = 4000;      // !games — min delay before auto-answering a chat game (ms)
 const GAME_DELAY_MAX = 5000;      // !games — max delay before auto-answering a chat game (ms)
-const WORDLIST_PATH = '/usr/share/dict/words'; // dictionary used to solve "unscramble" games
+const WORDLIST_PATH = '/usr/share/dict/american-english-huge'; // dictionary used to solve "unscramble" games
 
 // ---- Auto login + server switch ----
 const AUTO_LOGIN = true;                  // detect a login prompt in chat and log in automatically
@@ -288,9 +288,9 @@ async function main() {
   // Fill-in-the-blank: turn a masked token like "app_e" or "c_t" into a regex
   // and find the dictionary word(s) that fit. Blanks may be _ . * or -.
   // Multi-word masks like "_uc_et _f a_o_o_l" are solved per-word and re-emitted
-  // with the original whitespace preserved. If any word in a multi-word mask
-  // has no dictionary match, fall back to the whole thing joined together in
-  // case the spaces are actually part of the answer.
+  // with the original whitespace preserved. If ANY word can't be solved, the
+  // entire answer is abandoned — no single-word fallback, so the bot never
+  // sends a wrong partial answer.
   function solveFillBlank(token) {
     loadAnagrams();
     if (!wordList) return null;
@@ -299,13 +299,11 @@ async function main() {
     if (parts.length > 1) {
       const solved = parts.map((p) => solveFillBlank(p));
       if (solved.every((w) => w)) return solved.join(' ');
-      // Some words couldn't be solved — fall through to the single-token path
-      // (joined without spaces) in case the puzzle was actually one long word.
+      return null; // can't solve every word — don't send a partial answer
     }
     const masked = token.toLowerCase().replace(/[^a-z_.*-]/g, '');
     if (!/[_.*-]/.test(masked) || !/[a-z]/.test(masked)) return null; // needs a blank AND a letter
     const re = new RegExp('^' + masked.replace(/[_.*-]/g, '[a-z]') + '$');
-    // Prefer the most common-ish (shortest then alphabetical is a decent proxy).
     const hits = wordList.filter((w) => w.length === masked.length && re.test(w));
     return hits.length ? hits[0] : null;
   }
@@ -443,13 +441,13 @@ async function main() {
     // 4) Fill-in-the-blank — a token with hidden letters like "app_e" or "c_t".
     // 4) Fill-in-the-blank — a token (or run of tokens) with hidden letters
     //    like "app_e" or "_uc_et _f a_o_o_l". If two or more masked words appear
-    //    on the same line, try to solve the whole phrase first (so multi-word
-    //    puzzles answer as a full sentence, not just the first word). Fall
-    //    back to a single-word solve for plain one-token masks.
+    //    on the same line, try to solve the whole phrase only. DON'T fall back
+    //    to single-word — that sends a wrong partial answer.
     const multi = text.match(/\b((?:[a-z]*[_.*-][a-z_.*-]*\s+){1,}[a-z]*[_.*-][a-z_.*-]*)\b/i);
     if (multi) {
       const ans = solveFillBlank(multi[1].trim());
       if (ans) return { answer: ans, kind: 'fill-blank' };
+      return null; // multi-word mask but can't solve all words — don't send partial
     }
     m = text.match(/\b([a-z]*[_.*-][a-z_.*-]*)\b/i);
     if (m) {
