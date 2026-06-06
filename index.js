@@ -14,8 +14,8 @@ const JOIN_TIMEOUT = 30000;       // ms to wait for a join before giving up and 
 const AFK_INTERVAL = 8000;        // ms between anti-AFK actions when !afk is on
 const TOOL_BREAK_BUFFER = 5;      // !oneblock won't use a tool with this many uses (or fewer) left — keeps it from breaking
 const MINE_REACH = 4.5;           // blocks: how close the bot must be to dig the target
-const GAME_DELAY_MIN = 4000;      // !games — min delay before auto-answering a chat game (ms)
-const GAME_DELAY_MAX = 5000;      // !games — max delay before auto-answering a chat game (ms)
+const GAME_DELAY_MIN = 3000;      // !games — min delay before auto-answering a chat game (ms)
+const GAME_DELAY_MAX = 4000;      // !games — max delay before auto-answering a chat game (ms)
 const WORDLIST_PATH = '/usr/share/dict/american-english-huge'; // dictionary used to solve "unscramble" games
 const CUSTOM_WORDS_PATH = './custom-words.txt'; // extra words (one per line); checked first
 
