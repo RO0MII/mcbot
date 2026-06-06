@@ -504,23 +504,41 @@ async function main() {
 
     const low = text.toLowerCase();
 
-    // System / game-over / reward lines: never a puzzle. A result like
-    // "unify9 unreversed the word in 7.05 seconds!" or "You have received 10
-    // Coins." must NOT be mistaken for an instruction or a payload — and it
-    // ends the round, so drop any pending operation too.
-    if (/progress|please wait|please avoid|spam|cooldown|prohibited|cancell?ed|\bcoins?\b|you (?:have )?(?:won|received)|\bgg\b|winner|\bin \d+(?:\.\d+)?\s*seconds?\b|unreversed|unscrambled/i.test(low)) {
+    // Server NOISE — periodic broadcasts that are NOT puzzles and must NOT end a
+    // round: entity cleaners, tp/kill warnings, cooldowns. These often land in the
+    // gap between the instruction and the puzzle line, so ignore the line but keep
+    // any pending game ALIVE. (This is what used to eat the unscramble round:
+    // "Entities will be cleared in 60 seconds!" matched "in N seconds" and wiped it.)
+    if (/progress|please wait|please avoid|spam|cooldown|prohibited|cancell?ed|will be cleared|entities will|tpa? request|teleport request|be careful/i.test(low)) {
+      return;
+    }
+
+    // Round-END / result lines — a winner, reward, or "nobody got it". These DO
+    // end the round, so drop any pending op. Keyed off result WORDS (not a bare
+    // "in N seconds") so an unrelated countdown isn't mistaken for a result.
+    if (/\bcoins?\b|you (?:have )?(?:won|received)|\bgg\b|\bwinner\b|\bnobody\b|the word was|\bunreversed\b|\bunscrambled\b|\bunjumbled\b/i.test(low)) {
       clearPending();
       return;
     }
 
-    // (1) A game type was announced earlier — this line is the puzzle payload.
+    // (1) A game type was announced earlier — this line should be the puzzle
+    //     payload. Only consume the pending op if the line actually LOOKS like a
+    //     payload: letter games are a single word, math has a digit. A stray
+    //     broadcast that slips past the filters above won't burn the round anymore.
     if (pendingGame) {
       const payload = text.replace(/^[\s▶►»➤→•·*:.\-]+/, '').trim(); // drop leading markers
-      const kind = pendingGame;
-      clearPending();
-      const ans = applyGame(kind, payload);
-      if (ans) return scheduleAnswer(ans, kind);
-      // couldn't solve — fall through and treat this line normally
+      const tokenGame = pendingGame === 'unscramble' || pendingGame === 'reverse';
+      const looksLikePayload = tokenGame ? /^[a-z]{2,}$/i.test(payload)
+        : pendingGame === 'math' ? /\d/.test(payload)
+        : payload.length >= 2; // fill / type: accept any non-empty line
+      if (looksLikePayload) {
+        const kind = pendingGame;
+        clearPending();
+        const ans = applyGame(kind, payload);
+        if (ans) return scheduleAnswer(ans, kind);
+        // couldn't solve — fall through and treat this line normally
+      }
+      // not a plausible payload — leave the pending op armed for the next line
     }
 
     // (2) Real game instruction ("The first to <op> ... wins!"). The puzzle
