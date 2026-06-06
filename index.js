@@ -526,7 +526,11 @@ async function main() {
     //     payload: letter games are a single word, math has a digit. A stray
     //     broadcast that slips past the filters above won't burn the round anymore.
     if (pendingGame) {
-      const payload = text.replace(/^[\s▶►»➤→•·*:.\-]+/, '').trim(); // drop leading markers
+      // Drop leading bullets/markers — but DON'T eat a sign glued to a number:
+      // "▶ -7 * 10 * -8" must keep its leading "-" (stripping it made 560 -> -560).
+      // A dash/star/dot is a marker only when followed by whitespace; attached to a
+      // digit (-7, .5) it's part of the expression.
+      const payload = text.replace(/^(?:[\s▶►»➤→•·:]|[-*.](?=\s))+/, '').trim();
       const tokenGame = pendingGame === 'unscramble' || pendingGame === 'reverse';
       const looksLikePayload = tokenGame ? /^[a-z]{2,}$/i.test(payload)
         : pendingGame === 'math' ? /\d/.test(payload)
