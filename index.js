@@ -18,6 +18,16 @@ const GAME_DELAY_MIN = 6000;      // !games — min delay before auto-answering 
 const GAME_DELAY_MAX = 8000;      // !games — max delay before auto-answering a chat game (ms)
 const WORDLIST_PATH = '/usr/share/dict/words'; // dictionary used to solve "unscramble" games
 
+// ---- Auto login + server switch ----
+const AUTO_LOGIN = true;                  // detect a login prompt in chat and log in automatically
+const LOGIN_PASSWORD = 'romi322';         // password sent as "/login <password>"
+const LOGIN_COMMAND = `/login ${LOGIN_PASSWORD}`;
+const SWITCH_COMMAND = '/server oneblock';// command that moves us to the target sub-server
+const SWITCH_AFTER_LOGIN = 4000;          // ms after logging in before switching servers
+const SWITCH_FALLBACK = 6000;             // ms after joining to switch anyway (login prompt or not)
+// Chat lines that mean "you must authenticate" — triggers LOGIN_COMMAND.
+const LOGIN_PROMPT = /\b(login|loggin|log in|register|registro|authme|password)\b/i;
+
 // Terminal colors (truecolor for rich, vivid output)
 const rgb = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
 const c = {
@@ -326,11 +336,12 @@ async function main() {
   // Given a chat line, work out the answer to a game — or null if it's not one we solve.
   // Returns { answer, kind } so the console can label what it solved.
   function solveGame(msg) {
-    const text = msg.trim();
+    // Strip Minecraft color codes (§a, &b, ...) so server-formatted game lines match.
+    const text = msg.replace(/[§&][0-9a-fk-or]/gi, '').trim();
     const low = text.toLowerCase();
 
-    // 1) Unscramble — "unscramble: ttacle" / "unscramble the word ttacle"
-    let m = low.match(/unscramble[^a-z0-9]*(?:the word[:\s]*)?([a-z]{3,})/);
+    // 1) Unscramble — "unscramble: ttacle" / "scramble the word ttacle" / "jumble"
+    let m = low.match(/(?:unscramble|unjumble|scramble|jumble)[^a-z0-9]*(?:the word[:\s]*)?([a-z]{3,})/);
     if (m) {
       const key = m[1].split('').sort().join('');
       const hits = loadAnagrams().get(key);
@@ -339,13 +350,15 @@ async function main() {
       if (ans) return { answer: ans, kind: 'unscramble' };
     }
 
-    // 2) Math — "solve 5 + 3", "what is 12 x 4", "first to answer 7*8"
-    if (/\b(solve|what(?:'s| is)|answer|calculate|=)\b/.test(low) || /\d\s*[+\-*x/]\s*-?\s*\d/.test(low)) {
-      const expr = text.match(/[-0-9+\-*x/().\s]*\d[-0-9+\-*x/().\s]*/i);
-      if (expr) {
-        const ans = evalMath(expr[0]);
-        if (ans !== null) return { answer: ans, kind: 'math' };
-      }
+    // 2) Math — "solve 5 + 3", "what is 12 x 4", "first to answer 7*8".
+    //    Only grab a run that actually has an operator BETWEEN two numbers, so a
+    //    question number ("#3"), reward ("9 coins") or timer never gets mistaken
+    //    for the sum. Among all candidates, the longest is the real equation.
+    const mathExprs = text.match(/\d+(?:\.\d+)?(?:\s*[-+*x/]\s*\d+(?:\.\d+)?)+/gi);
+    if (mathExprs) {
+      const expr = mathExprs.sort((a, b) => b.length - a.length)[0];
+      const ans = evalMath(expr);
+      if (ans !== null) return { answer: ans, kind: 'math' };
     }
 
     // 3) Type-the-word / retype — "first to type 'PINEAPPLE' wins" / "type: HELLO"
@@ -545,6 +558,25 @@ async function main() {
 
     let joined = false;   // becomes true once we actually spawn in
     let offline = false;  // set when the failure is just "server unreachable"
+    let loggedIn = false; // becomes true once we've sent LOGIN_COMMAND
+    let switched = false; // becomes true once we've sent SWITCH_COMMAND
+    let switchFallback = null; // timer that switches anyway if no login prompt arrives
+
+    // Send the server-switch command exactly once per connection.
+    function doSwitch() {
+      if (switched || !bot || !bot.player) return;
+      switched = true;
+      if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
+      try { bot.chat(SWITCH_COMMAND); ui.ok('Server switch', SWITCH_COMMAND); } catch (_) {}
+    }
+
+    // Send the login command once, then switch SWITCH_AFTER_LOGIN ms later.
+    function doLogin() {
+      if (loggedIn || !bot || !bot.player) return;
+      loggedIn = true;
+      try { bot.chat(LOGIN_COMMAND); ui.ok('Auto-login', `sent ${LOGIN_COMMAND}`); } catch (_) {}
+      setTimeout(doSwitch, SWITCH_AFTER_LOGIN);
+    }
 
     // Watchdog: if nothing happens within JOIN_TIMEOUT (auto-detect hang,
     // server stuck "starting", etc.) tear the socket down and retry cleanly.
@@ -561,6 +593,10 @@ async function main() {
       console.log(`\n  ${c.green}${c.bold}✅ JOINED THE SERVER${c.reset} ${c.gray}— ${c.white}${username}${c.gray} is now in ${c.white}${host}:${port}${c.gray}.${c.reset}`);
       console.log(`  ${c.gray}  Type a message to chat. Start with ${c.yellow}/${c.gray} for a server command, ${c.yellow}!${c.gray} for a bot command.${c.reset}`);
       console.log(`  ${c.gray}  Type ${c.yellow}!help${c.gray} for bot commands, ${c.yellow}quit${c.gray} or ${c.yellow}Ctrl+C${c.gray} to exit.${c.reset}\n`);
+
+      // Switch to the target server within SWITCH_FALLBACK whether or not a
+      // login prompt ever shows up (covers servers that don't require auth).
+      if (AUTO_LOGIN) switchFallback = setTimeout(doSwitch, SWITCH_FALLBACK);
     });
 
     // Auto-respawn is on by default (createBot respawn option) — just log it cleanly.
@@ -571,6 +607,8 @@ async function main() {
     // Show server chat
     bot.on('messagestr', (message) => {
       process.stdout.write(`\r  ${c.cyan}${c.bold}[CHAT]${c.reset} ${c.white}${message}${c.reset}\n`);
+      // Auto-login: the server asks us to authenticate -> send LOGIN_COMMAND.
+      if (AUTO_LOGIN && !loggedIn && LOGIN_PROMPT.test(message)) doLogin();
       if (gameMode) maybeAnswerGame(message); // auto-answer chat games when !games is on
     });
 
@@ -587,6 +625,7 @@ async function main() {
 
     bot.on('end', () => {
       clearTimeout(watchdog);
+      if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
       if (mining) mining = null; // stop the mine loop; the old bot is gone
       if (!joined) {
         if (offline) {
