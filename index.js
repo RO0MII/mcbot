@@ -24,7 +24,7 @@ const LOGIN_PASSWORD = 'romi321';         // password sent as "/login <password>
 const LOGIN_COMMAND = `/login ${LOGIN_PASSWORD}`;
 const SWITCH_COMMAND = '/server oneblock';// command that moves us to the target sub-server
 const SWITCH_AFTER_LOGIN = 4000;          // ms after logging in before switching servers
-const SWITCH_FALLBACK = 6000;             // ms after joining to switch anyway (login prompt or not)
+const SWITCH_FALLBACK = 8000;             // ms after joining to switch anyway (login prompt or not)
 // Chat lines that mean "you must authenticate" — triggers LOGIN_COMMAND.
 const LOGIN_PROMPT = /\b(login|loggin|log in|register|registro|authme|password)\b/i;
 
