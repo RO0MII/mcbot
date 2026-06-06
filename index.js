@@ -362,6 +362,9 @@ async function main() {
     loadPhrases();
     if (!phraseList.length) return null;
     if (!/[_.*-]/.test(token)) return null; // no blank — nothing to fill
+    // Only match multi-word tokens — single-word fill puzzles should use the
+    // dictionary, not the phrase list (avoids "tuff" hijacking "_f").
+    if (!/\s/.test(token.trim())) return null;
     const gap = opts.exactOne ? '[a-z]' : '[a-z]{1,3}';
     const words = token.toLowerCase().split(/\s+/).filter(Boolean);
     const parts = words.map((w) => {
