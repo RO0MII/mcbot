@@ -469,8 +469,16 @@ async function main() {
     if (!gameMode || !bot || !bot.player) return;
     const text = msg.replace(/[§&][0-9a-fk-or]/gi, '').trim();
     if (!text) return; // blank separator line
-    if (/progress|please wait|please avoid|spam|cooldown/i.test(text)) return; // system line
     const low = text.toLowerCase();
+
+    // System / game-over / reward lines: never a puzzle. A result like
+    // "unify9 unreversed the word in 7.05 seconds!" or "You have received 10
+    // Coins." must NOT be mistaken for an instruction or a payload — and it
+    // ends the round, so drop any pending operation too.
+    if (/progress|please wait|please avoid|spam|cooldown|prohibited|cancell?ed|\bcoins?\b|you (?:have )?(?:won|received)|\bgg\b|winner|\bin \d+(?:\.\d+)?\s*seconds?\b|unreversed|unscrambled/i.test(low)) {
+      clearPending();
+      return;
+    }
 
     // (1) A game type was announced earlier — this line is the puzzle payload.
     if (pendingGame) {
@@ -486,9 +494,12 @@ async function main() {
     const solved = solveGame(text);
     if (solved) return scheduleAnswer(solved.answer, solved.kind);
 
-    // (3) Instruction line with no payload yet — remember it for the next line.
-    const kind = detectInstruction(low);
-    if (kind) setPending(kind);
+    // (3) Real game instruction ("The first to <op> ... wins!") — remember the
+    //     op for the next line. Only a call-to-action, never a past-tense result.
+    if (/first (?:to|person)/.test(low)) {
+      const kind = detectInstruction(low);
+      if (kind) setPending(kind);
+    }
   }
 
   // Handle a `!command` typed in the console. Never touches server chat.
