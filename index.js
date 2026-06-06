@@ -16,8 +16,10 @@ const TOOL_BREAK_BUFFER = 5;      // !oneblock won't use a tool with this many u
 const MINE_REACH = 4.5;           // blocks: how close the bot must be to dig the target
 const GAME_DELAY_MIN = 3000;      // !games — min delay before auto-answering a chat game (ms)
 const GAME_DELAY_MAX = 5000;      // !games — max delay before auto-answering a chat game (ms)
+const FILL_MISSING_LETTERS_ONLY = false; // fill games: send ONLY the missing letters. Stays off until a "type only the missing letters" note is seen, then auto-enables for the session.
 const WORDLIST_PATH = '/usr/share/dict/american-english-huge'; // dictionary used to solve "unscramble" games
 const CUSTOM_WORDS_PATH = './custom-words.txt'; // extra words (one per line); checked first
+const CUSTOM_TRIVIA_PATH = './custom-trivia.txt'; // extra "question keywords = answer" lines; checked first
 
 // ---- Auto login + server switch ----
 const AUTO_LOGIN = true;                  // detect a login prompt in chat and log in automatically
@@ -162,6 +164,7 @@ async function main() {
   let following = null;  // username we're currently following, or null
   let mining = null;     // { pos: Vec3 } while !oneblock is running, or null
   let gameMode = false;  // true while !games auto-answering is on
+  let fillMissingOnly = FILL_MISSING_LETTERS_ONLY; // sticky: send only the missing letters for fill games
 
   const notConnected = `  ${c.orange}▲${c.reset} ${c.orange}${c.bold}Not connected${c.reset} ${c.gray}— wait for "JOINED THE SERVER".${c.reset}`;
 
@@ -311,21 +314,24 @@ async function main() {
   // with the original whitespace preserved. If ANY word can't be solved, the
   // entire answer is abandoned — no single-word fallback, so the bot never
   // sends a wrong partial answer.
-  function solveFillBlank(token) {
+  function solveFillBlank(token, opts = {}) {
     loadAnagrams();
     if (!wordList) return null;
     if (!token) return null;
     const parts = token.split(/\s+/).filter(Boolean);
     if (parts.length > 1) {
-      const solved = parts.map((p) => solveFillBlank(p));
+      const solved = parts.map((p) => solveFillBlank(p, opts));
       if (solved.every((w) => w)) return solved.join(' ');
       return null; // can't solve every word — don't send a partial answer
     }
     const masked = token.toLowerCase().replace(/[^a-z_.*-]/g, '');
     if (!/[_.*-]/.test(masked) || !/[a-z]/.test(masked)) return null; // needs a blank AND a letter
-    // `_` = variable-length gap (1-3 chars); `.`, `*`, `-` = single letter each
+    // `_` = variable-length gap (1-3 chars); `.`, `*`, `-` = single letter each.
+    // With opts.exactOne every `_` is exactly ONE letter — used when we must line
+    // the solved word up against the mask to read off just the missing letters.
+    const gap = opts.exactOne ? '[a-z]' : '[a-z]{1,3}';
     // Order: replace .*- first (keeps `_`), then _ (so _ isn't caught in .*-)
-    let reStr = masked.replace(/[.*-]/g, '[a-z]').replace(/_/g, '[a-z]{1,3}');
+    let reStr = masked.replace(/[.*-]/g, '[a-z]').replace(/_/g, gap);
     const re = new RegExp('^' + reStr + '$');
     const fixedCount = masked.replace(/[_.*-]/g, '').length;
     const gapCount = (masked.match(/_/g) || []).length;
@@ -344,9 +350,14 @@ async function main() {
     'missing', 'letters', 'letter', 'word', 'words', 'answer', 'answers',
   ]);
 
-  // Small built-in trivia table for the few question types a bot can answer offline.
-  // Add your own "question substring": "answer" pairs here — first match wins.
+  // Built-in trivia table for question games ("first to answer the question wins").
+  // Each KEY is a set of space-separated KEYWORDS: a question matches an entry
+  // only when EVERY keyword appears somewhere in the question. More-specific
+  // entries (more keywords) are tried first, so a precise match always wins over
+  // a loose one. To add server-specific Q&A WITHOUT editing code, put
+  // "keywords = answer" lines in custom-trivia.txt — those are checked first.
   const TRIVIA = {
+    // --- Geography ---
     'capital of france': 'Paris',
     'capital of japan': 'Tokyo',
     'capital of italy': 'Rome',
@@ -358,22 +369,71 @@ async function main() {
     'capital of canada': 'Ottawa',
     'capital of australia': 'Canberra',
     'capital of sri lanka': 'Sri Jayawardenepura Kotte',
+    'largest ocean': 'Pacific',
+    'tallest mountain': 'Mount Everest',
+    'longest river': 'Nile',
+    'fastest land animal': 'Cheetah',
+    // --- Space / science ---
     'largest planet': 'Jupiter',
     'smallest planet': 'Mercury',
     'red planet': 'Mars',
     'closest planet to the sun': 'Mercury',
+    'chemical symbol for water': 'H2O',
+    'chemical symbol for gold': 'Au',
+    // --- Counting ---
     'how many continents': '7',
     'how many days in a week': '7',
     'how many colors in a rainbow': '7',
-    'chemical symbol for water': 'H2O',
-    'chemical symbol for gold': 'Au',
-    'fastest land animal': 'Cheetah',
-    'largest ocean': 'Pacific',
-    'tallest mountain': 'Mount Everest',
-    'longest river': 'Nile',
+    // --- Minecraft (high-confidence; tweak in custom-trivia.txt if your server differs) ---
+    'how many wood types': '14',
+    'how many eyes ender': '12',
+    'how many end portal frames': '12',
+    'how many slots hotbar': '9',
+    'which mob explodes': 'Creeper',
+    'mob blows up': 'Creeper',
+    'creepers afraid': 'Cat',
+    'creepers scared': 'Cat',
+    'mine diamonds with': 'Iron Pickaxe',
+    'mine diamond with': 'Iron Pickaxe',
+    'tame a wolf': 'Bone',
+    'breed cows': 'Wheat',
+    'breed pigs': 'Carrot',
+    'hardest blast resistant block': 'Obsidian',
   };
+
+  // Lazily-built, ordered list of trivia entries: { keys:[...], answer }.
+  // custom-trivia.txt entries come first; then built-ins, most-specific first.
+  let triviaEntries = null;
+  function loadTrivia() {
+    if (triviaEntries) return triviaEntries;
+    const entries = [];
+    // (a) Custom server-specific Q&A — "keywords = answer" (or "keywords | answer").
+    //     Lines starting with # are comments. These win over the built-in table.
+    try {
+      const lines = fs.readFileSync(CUSTOM_TRIVIA_PATH, 'utf8').split('\n');
+      for (let ln of lines) {
+        ln = ln.trim();
+        if (!ln || ln.startsWith('#')) continue;
+        const i = ln.search(/[=|]/);
+        if (i < 0) continue;
+        const keys = ln.slice(0, i).toLowerCase().trim().split(/\s+/).filter(Boolean);
+        const answer = ln.slice(i + 1).trim();
+        if (keys.length && answer) entries.push({ keys, answer, custom: true });
+      }
+    } catch (_) { /* no custom-trivia.txt — that's fine */ }
+    // (b) Built-in table.
+    for (const q in TRIVIA) {
+      entries.push({ keys: q.toLowerCase().split(/\s+/).filter(Boolean), answer: TRIVIA[q], custom: false });
+    }
+    // Custom first; within each group, more keywords (more specific) first.
+    entries.sort((a, b) => (a.custom === b.custom ? b.keys.length - a.keys.length : a.custom ? -1 : 1));
+    triviaEntries = entries;
+    return entries;
+  }
   function solveTrivia(low) {
-    for (const q in TRIVIA) if (low.includes(q)) return TRIVIA[q];
+    for (const e of loadTrivia()) {
+      if (e.keys.every((k) => low.includes(k))) return e.answer;
+    }
     return null;
   }
   function evalMath(expr) {
@@ -459,7 +519,7 @@ async function main() {
         // If the token has a hidden letter (e.g. "type c_t"), it's a fill-blank, not a literal.
         if (/[_.*-]/.test(tok)) {
           const filled = solveFillBlank(tok);
-          if (filled) return { answer: filled, kind: 'fill-blank' };
+          if (filled) return { answer: filled, kind: 'fill-blank', mask: tok };
         }
         return { answer: tok, kind: 'type' };
       }
@@ -473,13 +533,13 @@ async function main() {
     const multi = text.match(/\b((?:[a-z]*[_.*-][a-z_.*-]*\s+){1,}[a-z]*[_.*-][a-z_.*-]*)\b/i);
     if (multi) {
       const ans = solveFillBlank(multi[1].trim());
-      if (ans) return { answer: ans, kind: 'fill-blank' };
+      if (ans) return { answer: ans, kind: 'fill-blank', mask: multi[1].trim() };
       return null; // multi-word mask but can't solve all words — don't send partial
     }
     m = text.match(/\b([a-z]*[_.*-][a-z_.*-]*)\b/i);
     if (m) {
       const ans = solveFillBlank(m[1]);
-      if (ans) return { answer: ans, kind: 'fill-blank' };
+      if (ans) return { answer: ans, kind: 'fill-blank', mask: m[1] };
     }
 
     // 5) Trivia — a small built-in table of common questions (offline-safe).
@@ -513,6 +573,10 @@ async function main() {
     if (/\bsolve\b|math|calculate|equation/.test(low)) return 'math';
     if (/reveal|fill|missing/.test(low)) return 'fill';
     if (/\b(type|retype|repeat|copy)\b/.test(low)) return 'type';
+    // Generic knowledge question ("first to answer the question wins"). Checked
+    // last so a more specific game (math/unscramble/...) is preferred. The actual
+    // question arrives on the NEXT line and is solved against the trivia table.
+    if (/\bquestion\b|answer the|trivia|guess the/.test(low)) return 'trivia';
     return null;
   }
 
@@ -548,6 +612,7 @@ async function main() {
       case 'math':       return evalMath(payload);
       case 'fill':       return solveFillBlank(payload);
       case 'type':       return payload;
+      case 'trivia':     return solveTrivia(payload.toLowerCase());
       default:           return null;
     }
   }
@@ -564,18 +629,80 @@ async function main() {
     }, delay);
   }
 
+  // ---- Fill-in-the-gaps: "only the missing letters" support ----
+  // Some servers want ONLY the letters that go in the blanks, not the whole word
+  // — they print a note like "(make sure to only type the missing letters)".
+  // When that's the rule we align the solved word to the mask and send just the
+  // blank letters (e.g. mask "Books__l_" + word "bookshelf" -> "hef").
+
+  // Letters that fill the blanks of `mask`, read off `word`, in order. Aligns
+  // per whitespace-separated chunk; returns null if any chunk's lengths don't
+  // line up, so we never send a mis-aligned guess.
+  function fillMissing(mask, word) {
+    if (!word) return null;
+    const mParts = String(mask).toLowerCase().split(/\s+/).filter(Boolean);
+    const wParts = String(word).toLowerCase().split(/\s+/).filter(Boolean);
+    if (mParts.length !== wParts.length) return null;
+    let out = '';
+    for (let i = 0; i < mParts.length; i++) {
+      const m = mParts[i].replace(/[^a-z_.*-]/g, '');
+      const w = wParts[i].replace(/[^a-z]/g, '');
+      if (m.length !== w.length) return null; // can't align this chunk
+      for (let j = 0; j < m.length; j++) if (/[_.*-]/.test(m[j])) out += w[j];
+    }
+    return out || null;
+  }
+
+  // Decide what to actually send for a fill puzzle, honoring `missingOnly`.
+  // Returns { send, full, missing } or null if unsolved.
+  function resolveFill(token, missingOnly) {
+    const full = solveFillBlank(token);
+    if (!missingOnly) return full ? { send: full, full, missing: null } : null;
+    // Need a word the SAME length as the mask so blanks line up 1:1. The normal
+    // (variable-gap) solve usually already is; if not, retry with exact-one gaps.
+    let aligned = full;
+    let miss = fillMissing(token, aligned);
+    if (!miss) { aligned = solveFillBlank(token, { exactOne: true }); miss = fillMissing(token, aligned); }
+    if (miss) return { send: miss, full: aligned, missing: miss };
+    return full ? { send: full, full, missing: null } : null; // can't align — send the full word
+  }
+
+  // Schedule a fill answer. We resolve full-word-vs-missing-letters at SEND time
+  // (not now) so a "(type only the missing letters)" note that lands in the gap
+  // between the puzzle line and our delayed answer is still honored this round.
+  function scheduleFill(token) {
+    const delay = GAME_DELAY_MIN + Math.floor(Math.random() * (GAME_DELAY_MAX - GAME_DELAY_MIN + 1));
+    ui.info('Game: fill-blank', `solving "${token}" — sending in ${(delay / 1000).toFixed(1)}s`);
+    setTimeout(() => {
+      if (!gameMode || !bot || !bot.player) return;
+      const r = resolveFill(token, fillMissingOnly);
+      if (!r || !r.send) { ui.warn('Fill unsolved', token); return; }
+      const note = r.missing ? `${c.white}${r.send}${c.gray} (missing letters of ${r.full})` : `${c.white}${r.send}`;
+      try { bot.chat(r.send); ui.ok('Answer sent', note); } catch (_) {}
+    }, delay);
+  }
+
   // Decide what (if anything) to answer for one incoming chat line.
   function maybeAnswerGame(msg) {
     if (!gameMode || !bot || !bot.player) return;
     const text = msg.replace(/[§&][0-9a-fk-or]/gi, '').trim();
     if (!text) return; // blank separator line
+    const low = text.toLowerCase();
+
+    // Sticky rule: some servers want ONLY the missing letters for fill games. The
+    // note can be its own line or a parenthetical, and often arrives AFTER the
+    // puzzle — so detect it here (before asides are dropped) and remember it for
+    // the rest of the session. scheduleFill re-checks this flag at send time, so
+    // even the round the note first appears in gets answered correctly.
+    if (!fillMissingOnly && /missing letter|only the (?:missing )?letters|just the (?:missing )?letters/.test(low)) {
+      fillMissingOnly = true;
+      ui.info('Fill mode', 'server wants only the missing letters');
+    }
 
     // Parenthetical asides like "(make sure to only type the missing letters)"
     // are hints/notes, never the puzzle itself. Don't guess from them — and don't
     // clear any pending op, since a hint can sit between instruction and payload.
     if (/^\(.*\)$/.test(text)) return;
-
-    const low = text.toLowerCase();
 
     // Server NOISE — periodic broadcasts that are NOT puzzles and must NOT end a
     // round: entity cleaners, tp/kill warnings, cooldowns. These often land in the
@@ -589,7 +716,7 @@ async function main() {
     // Round-END / result lines — a winner, reward, or "nobody got it". These DO
     // end the round, so drop any pending op. Keyed off result WORDS (not a bare
     // "in N seconds") so an unrelated countdown isn't mistaken for a result.
-    if (/\bcoins?\b|you (?:have )?(?:won|received)|\bgg\b|\bwinner\b|\bnobody\b|the word was|\bunreversed\b|\bunscrambled\b|\bunjumbled\b/i.test(low)) {
+    if (/\bcoins?\b|you (?:have )?(?:won|received)|\bgg\b|\bwinner\b|\bnobody\b|the word was|\bunreversed\b|\bunscrambled\b|\bunjumbled\b|answered correctly|correct answer|the answer was|ran out of time|time(?:'s| is) up|no one (?:got|answered)/i.test(low)) {
       clearPending();
       return;
     }
@@ -612,10 +739,17 @@ async function main() {
         : pendingGame === 'math' ? /\d/.test(payload)
         : payload.length >= 2; // fill / type: accept any non-empty line
       if (looksLikePayload) {
-        const kind = pendingGame;
-        clearPending();
-        const ans = applyGame(kind, payload);
-        if (ans) return scheduleAnswer(ans, kind);
+        if (pendingGame === 'fill') {
+          // Only consume the round if we can actually solve it; otherwise leave
+          // the pending op armed for a later line. scheduleFill resolves the
+          // full-word-vs-missing-letters choice at send time.
+          if (solveFillBlank(payload)) { clearPending(); return scheduleFill(payload); }
+        } else {
+          const kind = pendingGame;
+          clearPending();
+          const ans = applyGame(kind, payload);
+          if (ans) return scheduleAnswer(ans, kind);
+        }
         // couldn't solve — fall through and treat this line normally
       }
       // not a plausible payload — leave the pending op armed for the next line
@@ -632,7 +766,10 @@ async function main() {
 
     // (3) Self-contained game on one line ("Solve: 5+3", "unscramble: tcouh", ...).
     const solved = solveGame(text);
-    if (solved) return scheduleAnswer(solved.answer, solved.kind);
+    if (solved) {
+      if (solved.kind === 'fill-blank' && solved.mask) return scheduleFill(solved.mask);
+      return scheduleAnswer(solved.answer, solved.kind);
+    }
   }
 
   // Handle a `!command` typed in the console. Never touches server chat.
@@ -665,6 +802,7 @@ async function main() {
         if (mode === 'on') {
           gameMode = true;
           loadAnagrams(); // warm the dictionary so the first answer isn't slow
+          loadTrivia();   // warm the trivia table (+ custom-trivia.txt) too
           ui.ok('Auto-games ON', `answering chat games in ${GAME_DELAY_MIN / 1000}-${GAME_DELAY_MAX / 1000}s`);
         } else if (mode === 'off') {
           gameMode = false;

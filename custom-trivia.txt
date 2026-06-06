@@ -1,0 +1,22 @@
+# custom-trivia.txt — answers for "first to answer the question wins" chat games.
+#
+# Format (one per line):   keyword1 keyword2 keyword3 = answer
+#   - The line on the LEFT of "=" is a set of KEYWORDS (not the exact question).
+#   - A question matches only when EVERY keyword appears in it (any order).
+#   - Use the fewest keywords that uniquely identify the question.
+#   - Lines starting with "#" are comments and are ignored.
+#   - These are checked BEFORE the built-in table, so you can override answers here.
+#
+# Tip: when you SEE a question in chat that the bot got wrong (or missed),
+#      add a line here with the answer the server accepted. No restart of the
+#      logic needed beyond turning !games off then on (that reloads this file).
+#
+# ---- Examples (edit the answers to match YOUR server) ----
+how many wood types = 14
+which mob explodes = Creeper
+what do creepers fear = Cat
+how many eyes of ender = 12
+rarest ore = Ancient Debris
+which biome has axolotls = Lush Caves
+what tool mines obsidian = Diamond Pickaxe
+how many hearts does a player have = 10
