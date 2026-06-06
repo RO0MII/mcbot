@@ -20,3 +20,16 @@ rarest ore = Ancient Debris
 which biome has axolotls = Lush Caves
 what tool mines obsidian = Diamond Pickaxe
 how many hearts does a player have = 10
+
+# ---- Minecraft Q&A seen in chat (edit answers to match YOUR server) ----
+# NOTE: "blaze rods to find the stronghold" — server's accepted number is a guess.
+# 12 eyes of ender fill the portal; 1 blaze rod = 2 blaze powder = 2 eyes, so 6 rods.
+# If the server expects a different number, change the 6 below.
+blaze rods stronghold = 6
+how many blaze rods stronghold = 6
+how many end portal frames = 12
+how many obsidian nether portal = 10
+tallest mob = Enderman
+what block absorbs water = Sponge
+what food never rots = Golden Apple
+how many bookshelves max enchanting = 15
