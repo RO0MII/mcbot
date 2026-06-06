@@ -14,8 +14,8 @@ const JOIN_TIMEOUT = 30000;       // ms to wait for a join before giving up and 
 const AFK_INTERVAL = 8000;        // ms between anti-AFK actions when !afk is on
 const TOOL_BREAK_BUFFER = 5;      // !oneblock won't use a tool with this many uses (or fewer) left — keeps it from breaking
 const MINE_REACH = 4.5;           // blocks: how close the bot must be to dig the target
-const GAME_DELAY_MIN = 6000;      // !games — min delay before auto-answering a chat game (ms)
-const GAME_DELAY_MAX = 8000;      // !games — max delay before auto-answering a chat game (ms)
+const GAME_DELAY_MIN = 4000;      // !games — min delay before auto-answering a chat game (ms)
+const GAME_DELAY_MAX = 5000;      // !games — max delay before auto-answering a chat game (ms)
 const WORDLIST_PATH = '/usr/share/dict/words'; // dictionary used to solve "unscramble" games
 
 // ---- Auto login + server switch ----
@@ -367,13 +367,23 @@ async function main() {
     }
 
     // 1) Unscramble — "unscramble: ttacle" / "scramble the word ttacle" / "jumble"
-    let m = low.match(/(?:unscramble|unjumble|scramble|jumble)[^a-z0-9]*(?:the word[:\s]*)?([a-z]{3,})/);
+    //    Allow multi-word scrambles (e.g. "adDe buTe olarC") — grab every letter
+    //    run after the keyword and unscramble the joined letters as one word.
+    let m = low.match(/(?:unscramble|unjumble|scramble|jumble)[^a-z0-9]*([a-z][a-z\s]*[a-z]|[a-z]{3,})/);
     if (m) {
-      const key = m[1].split('').sort().join('');
-      const hits = loadAnagrams().get(key);
-      // Prefer an answer that isn't the scrambled token itself.
-      const ans = hits && (hits.find((w) => w !== m[1]) || hits[0]);
-      if (ans) return { answer: ans, kind: 'unscramble' };
+      const raw = m[1].trim();
+      // Try per-word first (preserves word boundaries in the answer); fall back
+      // to the whole string joined together.
+      const parts = raw.split(/\s+/).filter(Boolean);
+      if (parts.length > 1) {
+        const ans = unscramblePayload(raw);
+        if (ans) return { answer: ans, kind: 'unscramble' };
+      } else {
+        const key = raw.split('').sort().join('');
+        const hits = loadAnagrams().get(key);
+        const ans = hits && (hits.find((w) => w !== raw) || hits[0]);
+        if (ans) return { answer: ans, kind: 'unscramble' };
+      }
     }
 
     // 2) Math — "solve 5 + 3", "what is 12 x 4", "first to answer 7*8".
@@ -459,8 +469,24 @@ async function main() {
     return null;
   }
 
-  // Unscramble a single payload word using the dictionary anagram map.
+  // Unscramble a payload word (or multi-word payload like "adDe buTe olarC")
+  // using the dictionary anagram map. Multi-word payloads are solved per-word
+  // and re-emitted with the original whitespace preserved.
   function unscramblePayload(payload) {
+    if (!payload) return null;
+    // Try each whitespace-separated chunk first; fall back to the whole thing
+    // joined together if a chunk has no dictionary anagram.
+    const parts = payload.split(/\s+/).filter(Boolean);
+    if (parts.length > 1) {
+      const solved = parts.map((p) => {
+        const word = p.toLowerCase().replace(/[^a-z]/g, '');
+        if (word.length < 2) return p; // too short — keep as-is
+        const hits = loadAnagrams().get(word.split('').sort().join(''));
+        return hits ? (hits.find((w) => w !== word) || hits[0]) : null;
+      });
+      // Need every chunk to solve — if any failed, fall through to single-word.
+      if (solved.every((w) => w)) return solved.join(' ');
+    }
     const word = payload.toLowerCase().replace(/[^a-z]/g, '');
     if (word.length < 2) return null;
     const hits = loadAnagrams().get(word.split('').sort().join(''));
@@ -532,7 +558,10 @@ async function main() {
       // digit (-7, .5) it's part of the expression.
       const payload = text.replace(/^(?:[\s▶►»➤→•·:]|[-*.](?=\s))+/, '').trim();
       const tokenGame = pendingGame === 'unscramble' || pendingGame === 'reverse';
-      const looksLikePayload = tokenGame ? /^[a-z]{2,}$/i.test(payload)
+      // unscramble / reverse can span multiple words ("adDe buTe olarC") — strip
+      // spaces before testing so a multi-word payload still counts as a payload.
+      const tokenPayload = payload.replace(/\s+/g, '');
+      const looksLikePayload = tokenGame ? /^[a-z]{2,}$/i.test(tokenPayload)
         : pendingGame === 'math' ? /\d/.test(payload)
         : payload.length >= 2; // fill / type: accept any non-empty line
       if (looksLikePayload) {
