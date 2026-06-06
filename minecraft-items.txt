@@ -1,0 +1,328 @@
+# Minecraft block/item names for unscramble games (one per line, # = comment).
+# Used to solve multi-word puzzles and break anagram ties. Add server-specific
+# names here freely — multi-word lines are matched as whole phrases.
+
+# --- Copper (oxidation x wax x shape) ---
+copper
+copper block
+copper ingot
+copper ore
+deepslate copper ore
+raw copper
+raw copper block
+cut copper
+cut copper stairs
+cut copper slab
+exposed copper
+exposed cut copper
+exposed cut copper stairs
+exposed cut copper slab
+weathered copper
+weathered cut copper
+weathered cut copper stairs
+weathered cut copper slab
+oxidized copper
+oxidized cut copper
+oxidized cut copper stairs
+oxidized cut copper slab
+waxed copper block
+waxed cut copper
+waxed cut copper stairs
+waxed cut copper slab
+waxed exposed copper
+waxed exposed cut copper
+waxed exposed cut copper stairs
+waxed exposed cut copper slab
+waxed weathered copper
+waxed weathered cut copper
+waxed weathered cut copper stairs
+waxed weathered cut copper slab
+waxed oxidized copper
+waxed oxidized cut copper
+waxed oxidized cut copper stairs
+waxed oxidized cut copper slab
+lightning rod
+copper bulb
+
+# --- Ores & raw materials ---
+coal
+coal ore
+iron ore
+iron ingot
+raw iron
+gold ore
+gold ingot
+raw gold
+diamond
+diamond ore
+emerald
+emerald ore
+lapis lazuli
+lapis lazuli ore
+redstone
+redstone ore
+redstone dust
+nether quartz
+nether gold ore
+ancient debris
+netherite ingot
+netherite scrap
+
+# --- Stone & building blocks ---
+stone
+cobblestone
+mossy cobblestone
+stone bricks
+mossy stone bricks
+cracked stone bricks
+chiseled stone bricks
+smooth stone
+deepslate
+cobbled deepslate
+polished deepslate
+deepslate bricks
+deepslate tiles
+chiseled deepslate
+granite
+polished granite
+diorite
+polished diorite
+andesite
+polished andesite
+calcite
+tuff
+dripstone block
+pointed dripstone
+sandstone
+red sandstone
+smooth sandstone
+chiseled sandstone
+cut sandstone
+bricks
+mud bricks
+nether bricks
+red nether bricks
+prismarine
+prismarine bricks
+dark prismarine
+sea lantern
+quartz block
+smooth quartz
+chiseled quartz block
+quartz pillar
+quartz bricks
+purpur block
+purpur pillar
+obsidian
+crying obsidian
+bedrock
+
+# --- Wood types ---
+oak log
+oak planks
+spruce log
+spruce planks
+birch log
+birch planks
+jungle log
+jungle planks
+acacia log
+acacia planks
+dark oak log
+dark oak planks
+mangrove log
+mangrove planks
+cherry log
+cherry planks
+bamboo planks
+bamboo block
+crimson stem
+crimson planks
+warped stem
+warped planks
+stripped oak log
+stripped spruce log
+
+# --- Terrain & nature ---
+dirt
+coarse dirt
+rooted dirt
+grass block
+podzol
+mycelium
+mud
+packed mud
+clay
+gravel
+sand
+red sand
+soul sand
+soul soil
+snow block
+ice
+packed ice
+blue ice
+magma block
+glowstone
+shroomlight
+moss block
+glow lichen
+sculk
+sculk catalyst
+sculk sensor
+sculk shrieker
+amethyst block
+budding amethyst
+amethyst cluster
+
+# --- Plants & food ---
+wheat
+bread
+carrot
+golden carrot
+potato
+baked potato
+poisonous potato
+beetroot
+apple
+golden apple
+enchanted golden apple
+melon
+melon slice
+pumpkin
+carved pumpkin
+sugar cane
+cocoa beans
+sweet berries
+glow berries
+nether wart
+chorus fruit
+cooked beef
+cooked porkchop
+cooked chicken
+cooked mutton
+cooked rabbit
+cooked cod
+cooked salmon
+mushroom stew
+rabbit stew
+beetroot soup
+pumpkin pie
+honey bottle
+honeycomb
+
+# --- Tools, weapons, armor ---
+wooden sword
+stone sword
+iron sword
+golden sword
+diamond sword
+netherite sword
+wooden pickaxe
+stone pickaxe
+iron pickaxe
+golden pickaxe
+diamond pickaxe
+netherite pickaxe
+iron axe
+diamond axe
+iron shovel
+diamond shovel
+iron hoe
+bow
+crossbow
+arrow
+spectral arrow
+trident
+shield
+fishing rod
+flint and steel
+shears
+leather helmet
+iron helmet
+diamond helmet
+netherite helmet
+iron chestplate
+diamond chestplate
+netherite chestplate
+iron leggings
+diamond leggings
+iron boots
+diamond boots
+elytra
+turtle helmet
+
+# --- Redstone & utility ---
+redstone torch
+redstone repeater
+redstone comparator
+piston
+sticky piston
+observer
+dispenser
+dropper
+hopper
+crafting table
+furnace
+blast furnace
+smoker
+anvil
+enchanting table
+brewing stand
+cauldron
+grindstone
+stonecutter
+smithing table
+loom
+cartography table
+fletching table
+lectern
+bell
+beacon
+conduit
+respawn anchor
+lodestone
+end crystal
+ender chest
+shulker box
+chest
+barrel
+note block
+jukebox
+target block
+slime block
+honey block
+tnt
+
+# --- Mobs & misc items ---
+ender pearl
+ender eye
+blaze rod
+blaze powder
+ghast tear
+magma cream
+gunpowder
+glowstone dust
+glistering melon slice
+fermented spider eye
+phantom membrane
+rabbit foot
+rabbit hide
+nautilus shell
+heart of the sea
+totem of undying
+dragon egg
+dragon breath
+experience bottle
+name tag
+saddle
+lead
+spyglass
+bundle
+recovery compass
+echo shard
+goat horn
+music disc
+firework rocket
+end portal frame
+spawner

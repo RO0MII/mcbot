@@ -20,6 +20,7 @@ const FILL_MISSING_LETTERS_ONLY = false; // fill games: send ONLY the missing le
 const WORDLIST_PATH = '/usr/share/dict/american-english-huge'; // dictionary used to solve "unscramble" games
 const CUSTOM_WORDS_PATH = './custom-words.txt'; // extra words (one per line); checked first
 const CUSTOM_TRIVIA_PATH = './custom-trivia.txt'; // extra "question keywords = answer" lines; checked first
+const MINECRAFT_ITEMS_PATH = './minecraft-items.txt'; // Minecraft block/item names (one per line); solves multi-word unscrambles & breaks anagram ties
 
 // ---- Auto login + server switch ----
 const AUTO_LOGIN = true;                  // detect a login prompt in chat and log in automatically
@@ -307,6 +308,42 @@ async function main() {
     return anagramMap;
   }
 
+  // Minecraft item/block names — used to solve unscramble puzzles that the plain
+  // dictionary can't. Server games scramble item names like "Waxed Oxidized Cut
+  // Copper Slab", which (a) are multi-word phrases the per-word solver mangles and
+  // (b) contain words with several valid anagrams (slab/labs, waxed/dewax) where
+  // picking the first dictionary hit gives a wrong answer. We build:
+  //   phraseMap : sorted-letters-of-whole-phrase -> original phrase  (exact match)
+  //   mcWordSet : every individual word seen in an item name         (tie-breaker)
+  let phraseMap = null;
+  let mcWordSet = null;
+  const lettersKey = (s) => s.toLowerCase().replace(/[^a-z]/g, '').split('').sort().join('');
+  function loadPhrases() {
+    if (phraseMap) return phraseMap;
+    phraseMap = new Map();
+    mcWordSet = new Set();
+    const ingest = (raw) => {
+      const phrase = raw.trim();
+      if (!phrase) return;
+      const key = lettersKey(phrase);
+      if (key.length >= 2 && !phraseMap.has(key)) phraseMap.set(key, phrase.toLowerCase());
+      for (const w of phrase.toLowerCase().split(/\s+/)) {
+        const clean = w.replace(/[^a-z]/g, '');
+        if (clean.length >= 2) mcWordSet.add(clean);
+      }
+    };
+    try {
+      for (const line of fs.readFileSync(MINECRAFT_ITEMS_PATH, 'utf8').split('\n')) ingest(line);
+    } catch (_) { /* no item list — fall back to dictionary-only solving */ }
+    // Multi-word lines in custom-words.txt are treated as phrases too.
+    try {
+      for (const line of fs.readFileSync(CUSTOM_WORDS_PATH, 'utf8').split('\n')) {
+        if (/\s/.test(line.trim())) ingest(line);
+      }
+    } catch (_) { /* no custom words file — fine */ }
+    return phraseMap;
+  }
+
   // Fill-in-the-blank: turn a masked token like "app_e" or "c_t" into a regex
   // and find the dictionary word(s) that fit. The defaults server uses `_` as
   // a variable-length gap (1+ chars) and `.*-` as single-letter wildcards.
@@ -585,23 +622,34 @@ async function main() {
   // and re-emitted with the original whitespace preserved.
   function unscramblePayload(payload) {
     if (!payload) return null;
-    // Try each whitespace-separated chunk first; fall back to the whole thing
-    // joined together if a chunk has no dictionary anagram.
+    // (0) Best signal: does the WHOLE phrase (ignoring spaces/case) match a known
+    // Minecraft item name? This nails multi-word answers like "waxed oxidized cut
+    // copper slab" exactly, and also resolves single-word anagram ties (slab vs
+    // labs) when the item list has the right word.
+    loadPhrases();
+    const phrase = phraseMap.get(lettersKey(payload));
+    if (phrase) return phrase;
+    // Pick the best anagram for one scrambled word: prefer a real Minecraft word,
+    // then any word that isn't just the scrambled input echoed back.
+    const pickHit = (hits, word) =>
+      hits.find((w) => w !== word && mcWordSet.has(w)) || hits.find((w) => w !== word) || hits[0];
+    // (1) Per-word: solve each whitespace-separated chunk against the dictionary.
     const parts = payload.split(/\s+/).filter(Boolean);
     if (parts.length > 1) {
       const solved = parts.map((p) => {
         const word = p.toLowerCase().replace(/[^a-z]/g, '');
         if (word.length < 2) return p; // too short — keep as-is
         const hits = loadAnagrams().get(word.split('').sort().join(''));
-        return hits ? (hits.find((w) => w !== word) || hits[0]) : null;
+        return hits ? pickHit(hits, word) : null;
       });
       // Need every chunk to solve — if any failed, fall through to single-word.
       if (solved.every((w) => w)) return solved.join(' ');
     }
+    // (2) Fall back to treating the whole payload as one joined word.
     const word = payload.toLowerCase().replace(/[^a-z]/g, '');
     if (word.length < 2) return null;
     const hits = loadAnagrams().get(word.split('').sort().join(''));
-    return (hits && (hits.find((w) => w !== word) || hits[0])) || null;
+    return (hits && pickHit(hits, word)) || null;
   }
 
   // Apply a known operation to the puzzle payload -> the answer to send.
