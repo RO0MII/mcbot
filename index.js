@@ -490,16 +490,18 @@ async function main() {
       // couldn't solve — fall through and treat this line normally
     }
 
-    // (2) Self-contained game on one line ("Solve: 5+3", "unscramble: tcouh", ...).
-    const solved = solveGame(text);
-    if (solved) return scheduleAnswer(solved.answer, solved.kind);
-
-    // (3) Real game instruction ("The first to <op> ... wins!") — remember the
-    //     op for the next line. Only a call-to-action, never a past-tense result.
+    // (2) Real game instruction ("The first to <op> ... wins!"). The puzzle
+    //     arrives on the NEXT line, so arm the pending op and DON'T answer this
+    //     line — otherwise "type the letters" wrongly answers "the". Checked
+    //     before the self-contained solver so instruction words aren't grabbed.
     if (/first (?:to|person)/.test(low)) {
       const kind = detectInstruction(low);
-      if (kind) setPending(kind);
+      if (kind) { setPending(kind); return; }
     }
+
+    // (3) Self-contained game on one line ("Solve: 5+3", "unscramble: tcouh", ...).
+    const solved = solveGame(text);
+    if (solved) return scheduleAnswer(solved.answer, solved.kind);
   }
 
   // Handle a `!command` typed in the console. Never touches server chat.
