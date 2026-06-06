@@ -298,6 +298,15 @@ async function main() {
     return hits.length ? hits[0] : null;
   }
 
+  // Filler words an instruction line dangles after "type" ("type the missing
+  // letters", "type your answer below"). A bare one of these is never the literal
+  // a "type: X" puzzle wants, so we refuse to send it as an answer.
+  const STOPWORDS = new Set([
+    'the', 'a', 'an', 'your', 'this', 'that', 'it', 'its', 'in', 'on', 'to',
+    'of', 'and', 'only', 'them', 'here', 'below', 'now', 'fast', 'quick',
+    'missing', 'letters', 'letter', 'word', 'words', 'answer', 'answers',
+  ]);
+
   // Small built-in trivia table for the few question types a bot can answer offline.
   // Add your own "question substring": "answer" pairs here — first match wins.
   const TRIVIA = {
@@ -390,15 +399,23 @@ async function main() {
     //    Also "retype this: <sentence>" / "repeat: <text>" / "copy this <text>".
     m = text.match(/(?:retype|repeat|copy)(?:\s+this)?[:\s]+(.+)/i);
     if (m && m[1].trim().length >= 2) return { answer: m[1].trim(), kind: 'retype' };
-    m = text.match(/type[^'"a-z0-9]*['"]([^'"]{2,})['"]/i)
-        || text.match(/type(?:\s+the\s+word)?[:\s]+([^\s.,!]{2,})/i);
+    //    Require a real delimiter — quotes, an explicit "type the word", or a
+    //    colon — NOT just a trailing space. Bare "type the missing letters" must
+    //    not grab "the": that mid-sentence instruction has no colon or quotes.
+    m = text.match(/type[^'"a-z0-9]*['"]([^'"]{2,})['"]/i)        // type 'WORD' / type "WORD"
+        || text.match(/type\s+the\s+word[:\s]+([^\s.,!]{2,})/i)   // type the word: WORD
+        || text.match(/type\s*:\s*([^\s.,!]{2,})/i);              // type: WORD
     if (m) {
-      // If the token has a hidden letter (e.g. "type c_t"), it's a fill-blank, not a literal.
-      if (/[_.*-]/.test(m[1])) {
-        const filled = solveFillBlank(m[1]);
-        if (filled) return { answer: filled, kind: 'fill-blank' };
+      const tok = m[1].trim();
+      // Skip instruction filler ("type the missing letters", "type your answer").
+      if (!STOPWORDS.has(tok.toLowerCase())) {
+        // If the token has a hidden letter (e.g. "type c_t"), it's a fill-blank, not a literal.
+        if (/[_.*-]/.test(tok)) {
+          const filled = solveFillBlank(tok);
+          if (filled) return { answer: filled, kind: 'fill-blank' };
+        }
+        return { answer: tok, kind: 'type' };
       }
-      return { answer: m[1], kind: 'type' };
     }
 
     // 4) Fill-in-the-blank — a token with hidden letters like "app_e" or "c_t".
@@ -479,6 +496,12 @@ async function main() {
     if (!gameMode || !bot || !bot.player) return;
     const text = msg.replace(/[§&][0-9a-fk-or]/gi, '').trim();
     if (!text) return; // blank separator line
+
+    // Parenthetical asides like "(make sure to only type the missing letters)"
+    // are hints/notes, never the puzzle itself. Don't guess from them — and don't
+    // clear any pending op, since a hint can sit between instruction and payload.
+    if (/^\(.*\)$/.test(text)) return;
+
     const low = text.toLowerCase();
 
     // System / game-over / reward lines: never a puzzle. A result like
