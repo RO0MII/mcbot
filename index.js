@@ -340,6 +340,13 @@ async function main() {
     const text = msg.replace(/[§&][0-9a-fk-or]/gi, '').trim();
     const low = text.toLowerCase();
 
+    // Skip server status / system lines that only LOOK like games — e.g. a
+    // mining "Progress: 0% (18/10172)" bar, rate-limit notices, etc. Without
+    // this the "(18/10172)" gets mistaken for a division game (= 0.002).
+    if (/progress|please wait|please avoid|spam|cooldown|^\s*\d+\s*%|\(\s*\d+\s*\/\s*\d+\s*\)/i.test(low)) {
+      return null;
+    }
+
     // 1) Unscramble — "unscramble: ttacle" / "scramble the word ttacle" / "jumble"
     let m = low.match(/(?:unscramble|unjumble|scramble|jumble)[^a-z0-9]*(?:the word[:\s]*)?([a-z]{3,})/);
     if (m) {
@@ -357,8 +364,16 @@ async function main() {
     const mathExprs = text.match(/\d+(?:\.\d+)?(?:\s*[-+*x/]\s*\d+(?:\.\d+)?)+/gi);
     if (mathExprs) {
       const expr = mathExprs.sort((a, b) => b.length - a.length)[0];
-      const ans = evalMath(expr);
-      if (ans !== null) return { answer: ans, kind: 'math' };
+      // Guard against stray numbers in normal sentences: only answer when the
+      // line is clearly a math QUESTION — either it has a math keyword, or the
+      // message is basically just the equation itself.
+      const hasMathKeyword = /\b(solve|calculate|what(?:'s| is)|answer|equation|math|sum|plus|minus|times)\b|=/.test(low);
+      const compact = text.replace(/\s+/g, '');
+      const isMostlyExpr = expr.replace(/\s+/g, '').length >= compact.length * 0.6;
+      if (hasMathKeyword || isMostlyExpr) {
+        const ans = evalMath(expr);
+        if (ans !== null) return { answer: ans, kind: 'math' };
+      }
     }
 
     // 3) Type-the-word / retype — "first to type 'PINEAPPLE' wins" / "type: HELLO"
@@ -390,20 +405,90 @@ async function main() {
     return null;
   }
 
-  // Schedule an answer to a detected game after a human-like random delay.
-  function maybeAnswerGame(msg) {
-    if (!gameMode || !bot || !bot.player) return;
-    const solved = solveGame(msg);
-    if (!solved) return;
+  // Some games announce the TYPE on one line ("The first to unreverse the
+  // letters wins!") and send the actual puzzle on a LATER line ("▶ ngiS ..").
+  // We remember the announced operation and apply it to the next payload line.
+  let pendingGame = null;   // 'reverse' | 'unscramble' | 'math' | 'fill' | 'type'
+  let pendingTimer = null;  // forgets the pending op if no payload arrives in time
+
+  function setPending(kind) {
+    pendingGame = kind;
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => { pendingGame = null; pendingTimer = null; }, 20000);
+    ui.info('Game detected', `${kind} — waiting for the puzzle line`);
+  }
+  function clearPending() {
+    pendingGame = null;
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+  }
+
+  // Read the game TYPE from an instruction line, or null if it isn't one.
+  function detectInstruction(low) {
+    if (/unreverse|reverse the|reversed/.test(low)) return 'reverse';
+    if (/unscramble|unjumble|scramble|jumble/.test(low)) return 'unscramble';
+    if (/\bsolve\b|math|calculate|equation/.test(low)) return 'math';
+    if (/reveal|fill|missing/.test(low)) return 'fill';
+    if (/\b(type|retype|repeat|copy)\b/.test(low)) return 'type';
+    return null;
+  }
+
+  // Unscramble a single payload word using the dictionary anagram map.
+  function unscramblePayload(payload) {
+    const word = payload.toLowerCase().replace(/[^a-z]/g, '');
+    if (word.length < 2) return null;
+    const hits = loadAnagrams().get(word.split('').sort().join(''));
+    return (hits && (hits.find((w) => w !== word) || hits[0])) || null;
+  }
+
+  // Apply a known operation to the puzzle payload -> the answer to send.
+  function applyGame(kind, payload) {
+    switch (kind) {
+      case 'reverse':    return payload.split('').reverse().join('');
+      case 'unscramble': return unscramblePayload(payload);
+      case 'math':       return evalMath(payload);
+      case 'fill':       return solveFillBlank(payload);
+      case 'type':       return payload;
+      default:           return null;
+    }
+  }
+
+  // Send an answer after a human-like random delay (once per puzzle).
+  function scheduleAnswer(answer, kind) {
+    if (answer === null || answer === undefined || answer === '') return;
+    const out = String(answer);
     const delay = GAME_DELAY_MIN + Math.floor(Math.random() * (GAME_DELAY_MAX - GAME_DELAY_MIN + 1));
-    ui.info(`Game: ${solved.kind}`, `answering "${solved.answer}" in ${(delay / 1000).toFixed(1)}s`);
+    ui.info(`Game: ${kind}`, `answering "${out}" in ${(delay / 1000).toFixed(1)}s`);
     setTimeout(() => {
       if (!gameMode || !bot || !bot.player) return;
-      try {
-        bot.chat(solved.answer);
-        ui.ok('Answer sent', `${c.white}${solved.answer}`);
-      } catch (_) {}
+      try { bot.chat(out); ui.ok('Answer sent', `${c.white}${out}`); } catch (_) {}
     }, delay);
+  }
+
+  // Decide what (if anything) to answer for one incoming chat line.
+  function maybeAnswerGame(msg) {
+    if (!gameMode || !bot || !bot.player) return;
+    const text = msg.replace(/[§&][0-9a-fk-or]/gi, '').trim();
+    if (!text) return; // blank separator line
+    if (/progress|please wait|please avoid|spam|cooldown/i.test(text)) return; // system line
+    const low = text.toLowerCase();
+
+    // (1) A game type was announced earlier — this line is the puzzle payload.
+    if (pendingGame) {
+      const payload = text.replace(/^[\s▶►»➤→•·*:.\-]+/, '').trim(); // drop leading markers
+      const kind = pendingGame;
+      clearPending();
+      const ans = applyGame(kind, payload);
+      if (ans) return scheduleAnswer(ans, kind);
+      // couldn't solve — fall through and treat this line normally
+    }
+
+    // (2) Self-contained game on one line ("Solve: 5+3", "unscramble: tcouh", ...).
+    const solved = solveGame(text);
+    if (solved) return scheduleAnswer(solved.answer, solved.kind);
+
+    // (3) Instruction line with no payload yet — remember it for the next line.
+    const kind = detectInstruction(low);
+    if (kind) setPending(kind);
   }
 
   // Handle a `!command` typed in the console. Never touches server chat.
