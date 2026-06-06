@@ -15,7 +15,7 @@ const AFK_INTERVAL = 8000;        // ms between anti-AFK actions when !afk is on
 const TOOL_BREAK_BUFFER = 5;      // !oneblock won't use a tool with this many uses (or fewer) left — keeps it from breaking
 const MINE_REACH = 4.5;           // blocks: how close the bot must be to dig the target
 const GAME_DELAY_MIN = 3000;      // !games — min delay before auto-answering a chat game (ms)
-const GAME_DELAY_MAX = 5000;      // !games — max delay before auto-answering a chat game (ms)
+const GAME_DELAY_MAX = 4000;      // !games — max delay before auto-answering a chat game (ms)
 const FILL_MISSING_LETTERS_ONLY = false; // fill games: send ONLY the missing letters instead of the full word. Default false = always send the FULL answer (e.g. "pink bundle", not "pbnd").
 const AUTO_MISSING_LETTERS = false;      // if true, auto-switch to missing-letters-only when the server prints a "type only the missing letters" note. Default false = ignore that note, keep sending the full word.
 const WORDLIST_PATH = '/usr/share/dict/american-english-huge'; // dictionary used to solve "unscramble" games
