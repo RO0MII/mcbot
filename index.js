@@ -17,6 +17,7 @@ const MINE_REACH = 4.5;           // blocks: how close the bot must be to dig th
 const GAME_DELAY_MIN = 4000;      // !games — min delay before auto-answering a chat game (ms)
 const GAME_DELAY_MAX = 5000;      // !games — max delay before auto-answering a chat game (ms)
 const WORDLIST_PATH = '/usr/share/dict/american-english-huge'; // dictionary used to solve "unscramble" games
+const CUSTOM_WORDS_PATH = './custom-words.txt'; // extra words (one per line); checked first
 
 // ---- Auto login + server switch ----
 const AUTO_LOGIN = true;                  // detect a login prompt in chat and log in automatically
@@ -281,12 +282,27 @@ async function main() {
         if (list) { if (!list.includes(w)) list.push(w); }
         else anagramMap.set(key, [w]);
       }
+      // Load custom server-specific words (one per line, plain text).
+      // These are checked first and can include hyphens, apostrophes, etc.
+      try {
+        const custom = fs.readFileSync(CUSTOM_WORDS_PATH, 'utf8').split('\n');
+        for (let w of custom) {
+          w = w.trim().toLowerCase();
+          if (!w || w.length < 2) continue;
+          wordList.unshift(w); // prepend — checked first
+          const key = w.split('').sort().join('');
+          const list = anagramMap.get(key);
+          if (list) { if (!list.includes(w)) list.push(w); }
+          else anagramMap.set(key, [w]);
+        }
+      } catch (_) { /* no custom words file — that's fine */ }
     } catch (_) { /* no dictionary — unscramble/fill-blank just won't solve */ }
     return anagramMap;
   }
 
   // Fill-in-the-blank: turn a masked token like "app_e" or "c_t" into a regex
-  // and find the dictionary word(s) that fit. Blanks may be _ . * or -.
+  // and find the dictionary word(s) that fit. The defaults server uses `_` as
+  // a variable-length gap (1+ chars) and `.*-` as single-letter wildcards.
   // Multi-word masks like "_uc_et _f a_o_o_l" are solved per-word and re-emitted
   // with the original whitespace preserved. If ANY word can't be solved, the
   // entire answer is abandoned — no single-word fallback, so the bot never
@@ -303,9 +319,16 @@ async function main() {
     }
     const masked = token.toLowerCase().replace(/[^a-z_.*-]/g, '');
     if (!/[_.*-]/.test(masked) || !/[a-z]/.test(masked)) return null; // needs a blank AND a letter
-    const re = new RegExp('^' + masked.replace(/[_.*-]/g, '[a-z]') + '$');
-    const hits = wordList.filter((w) => w.length === masked.length && re.test(w));
-    return hits.length ? hits[0] : null;
+    // `_` = variable-length gap (1-3 chars); `.`, `*`, `-` = single letter each
+    // Order: replace .*- first (keeps `_`), then _ (so _ isn't caught in .*-)
+    let reStr = masked.replace(/[.*-]/g, '[a-z]').replace(/_/g, '[a-z]{1,3}');
+    const re = new RegExp('^' + reStr + '$');
+    const fixedCount = masked.replace(/[_.*-]/g, '').length;
+    const gapCount = (masked.match(/_/g) || []).length;
+    const minLen = fixedCount + gapCount; // each gap contributes at least 1 letter
+    const hits = wordList.filter((w) => w.length >= minLen && re.test(w));
+    // Prefer the shortest match — that's almost always the real answer
+    return hits.length ? hits.sort((a, b) => a.length - b.length)[0] : null;
   }
 
   // Filler words an instruction line dangles after "type" ("type the missing
