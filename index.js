@@ -122,6 +122,10 @@ function handleStray(err) {
 process.on('uncaughtException', handleStray);
 process.on('unhandledRejection', handleStray);
 
+// Survive terminal disconnect — don't let a closed stdin kill the bot.
+// In tmux / nohup / SSH the process should keep running game answers.
+try { process.on('SIGHUP', () => {}); } catch (_) {} // ignore — keep running after SSH drops
+
 async function main() {
   printBanner();
 
@@ -924,6 +928,9 @@ async function main() {
         if (bot.player) bot.chat(text);
         else console.log(notConnected);
       });
+      // Terminal disconnect (SSH drop, tmux detach) can error stdin. Swallow
+      // it — the bot keeps running and answering games.
+      process.stdin.on('error', () => {}).on('close', () => {});
     }
   }
 
