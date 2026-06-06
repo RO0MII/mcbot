@@ -28,6 +28,16 @@ const SWITCH_FALLBACK = 8000;             // ms after joining to switch anyway (
 // Chat lines that mean "you must authenticate" — triggers LOGIN_COMMAND.
 const LOGIN_PROMPT = /\b(login|loggin|log in|register|registro|authme|password)\b/i;
 
+// ---- Auto re-join oneblock after a restart ----
+// When the sub-server restarts we get bounced to the lobby. Re-send the switch
+// command periodically (random 5-10 min, human-like) so we always end back on
+// it, and react faster when a restart / "sent to lobby" message shows up.
+const RESWITCH_MIN = 5 * 60 * 1000;   // re-send /server oneblock at least this often
+const RESWITCH_MAX = 10 * 60 * 1000;  // ...and at most this often
+const LOBBY_RESWITCH_DELAY = 5000;    // ms to wait after a restart message before re-switching
+// Chat lines that mean the sub-server restarted / we were sent back to the lobby.
+const LOBBY_PROMPT = /\b(restart(?:ing|ed)?|reboot(?:ing)?|sending you to|moved to (?:the )?lobby|sent to (?:the )?lobby|fell back|server is (?:going )?down|connection lost)\b/i;
+
 // Terminal colors (truecolor for rich, vivid output)
 const rgb = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
 const c = {
@@ -659,13 +669,32 @@ async function main() {
     let loggedIn = false; // becomes true once we've sent LOGIN_COMMAND
     let switched = false; // becomes true once we've sent SWITCH_COMMAND
     let switchFallback = null; // timer that switches anyway if no login prompt arrives
+    let reswitchTimer = null;  // periodic "/server oneblock" so a restart bounce gets us back
+    let lobbyReswitchAt = 0;   // debounce for restart-message-triggered re-switching
 
-    // Send the server-switch command exactly once per connection.
+    // Send the server-switch command exactly once per connection, then keep a
+    // periodic re-send going so a later sub-server restart (which bounces us to
+    // the lobby) always lands us back on oneblock.
     function doSwitch() {
       if (switched || !bot || !bot.player) return;
       switched = true;
       if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
       try { bot.chat(SWITCH_COMMAND); ui.ok('Server switch', SWITCH_COMMAND); } catch (_) {}
+      scheduleReswitch();
+    }
+
+    // Re-send SWITCH_COMMAND every 5-10 min (random). On oneblock the server
+    // just replies "already connected" (harmless); in the lobby it brings us
+    // back after a restart.
+    function scheduleReswitch() {
+      if (reswitchTimer) clearTimeout(reswitchTimer);
+      const delay = RESWITCH_MIN + Math.floor(Math.random() * (RESWITCH_MAX - RESWITCH_MIN + 1));
+      reswitchTimer = setTimeout(() => {
+        if (bot && bot.player) {
+          try { bot.chat(SWITCH_COMMAND); ui.info('Re-join oneblock', `${SWITCH_COMMAND} (auto, every 5-10m)`); } catch (_) {}
+        }
+        scheduleReswitch(); // queue the next cycle
+      }, delay);
     }
 
     // Send the login command once, then switch SWITCH_AFTER_LOGIN ms later.
@@ -707,6 +736,17 @@ async function main() {
       process.stdout.write(`\r  ${c.cyan}${c.bold}[CHAT]${c.reset} ${c.white}${message}${c.reset}\n`);
       // Auto-login: the server asks us to authenticate -> send LOGIN_COMMAND.
       if (AUTO_LOGIN && !loggedIn && LOGIN_PROMPT.test(message)) doLogin();
+      // Restart / "sent to lobby" -> re-join oneblock fast (debounced 30s).
+      if (AUTO_LOGIN && LOBBY_PROMPT.test(message)) {
+        const now = Date.now();
+        if (now - lobbyReswitchAt > 30000) {
+          lobbyReswitchAt = now;
+          ui.warn('Restart / lobby detected', `re-joining oneblock in ${LOBBY_RESWITCH_DELAY / 1000}s`);
+          setTimeout(() => {
+            if (bot && bot.player) { try { bot.chat(SWITCH_COMMAND); ui.ok('Re-join oneblock', SWITCH_COMMAND); } catch (_) {} }
+          }, LOBBY_RESWITCH_DELAY);
+        }
+      }
       if (gameMode) maybeAnswerGame(message); // auto-answer chat games when !games is on
     });
 
@@ -724,6 +764,7 @@ async function main() {
     bot.on('end', () => {
       clearTimeout(watchdog);
       if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
+      if (reswitchTimer) { clearTimeout(reswitchTimer); reswitchTimer = null; }
       if (mining) mining = null; // stop the mine loop; the old bot is gone
       if (!joined) {
         if (offline) {
