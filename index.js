@@ -287,9 +287,21 @@ async function main() {
 
   // Fill-in-the-blank: turn a masked token like "app_e" or "c_t" into a regex
   // and find the dictionary word(s) that fit. Blanks may be _ . * or -.
+  // Multi-word masks like "_uc_et _f a_o_o_l" are solved per-word and re-emitted
+  // with the original whitespace preserved. If any word in a multi-word mask
+  // has no dictionary match, fall back to the whole thing joined together in
+  // case the spaces are actually part of the answer.
   function solveFillBlank(token) {
     loadAnagrams();
     if (!wordList) return null;
+    if (!token) return null;
+    const parts = token.split(/\s+/).filter(Boolean);
+    if (parts.length > 1) {
+      const solved = parts.map((p) => solveFillBlank(p));
+      if (solved.every((w) => w)) return solved.join(' ');
+      // Some words couldn't be solved — fall through to the single-token path
+      // (joined without spaces) in case the puzzle was actually one long word.
+    }
     const masked = token.toLowerCase().replace(/[^a-z_.*-]/g, '');
     if (!/[_.*-]/.test(masked) || !/[a-z]/.test(masked)) return null; // needs a blank AND a letter
     const re = new RegExp('^' + masked.replace(/[_.*-]/g, '[a-z]') + '$');
@@ -429,6 +441,16 @@ async function main() {
     }
 
     // 4) Fill-in-the-blank — a token with hidden letters like "app_e" or "c_t".
+    // 4) Fill-in-the-blank — a token (or run of tokens) with hidden letters
+    //    like "app_e" or "_uc_et _f a_o_o_l". If two or more masked words appear
+    //    on the same line, try to solve the whole phrase first (so multi-word
+    //    puzzles answer as a full sentence, not just the first word). Fall
+    //    back to a single-word solve for plain one-token masks.
+    const multi = text.match(/\b((?:[a-z]*[_.*-][a-z_.*-]*\s+){1,}[a-z]*[_.*-][a-z_.*-]*)\b/i);
+    if (multi) {
+      const ans = solveFillBlank(multi[1].trim());
+      if (ans) return { answer: ans, kind: 'fill-blank' };
+    }
     m = text.match(/\b([a-z]*[_.*-][a-z_.*-]*)\b/i);
     if (m) {
       const ans = solveFillBlank(m[1]);
