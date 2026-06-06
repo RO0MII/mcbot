@@ -326,3 +326,272 @@ music disc
 firework rocket
 end portal frame
 spawner
+
+
+# --- Dyed item families (16 colors) ---
+white wool
+white carpet
+white bed
+white dye
+white bundle
+white banner
+white candle
+white concrete
+white concrete powder
+white terracotta
+white glazed terracotta
+white stained glass
+white stained glass pane
+white shulker box
+white wall banner
+orange wool
+orange carpet
+orange bed
+orange dye
+orange bundle
+orange banner
+orange candle
+orange concrete
+orange concrete powder
+orange terracotta
+orange glazed terracotta
+orange stained glass
+orange stained glass pane
+orange shulker box
+orange wall banner
+magenta wool
+magenta carpet
+magenta bed
+magenta dye
+magenta bundle
+magenta banner
+magenta candle
+magenta concrete
+magenta concrete powder
+magenta terracotta
+magenta glazed terracotta
+magenta stained glass
+magenta stained glass pane
+magenta shulker box
+magenta wall banner
+light blue wool
+light blue carpet
+light blue bed
+light blue dye
+light blue bundle
+light blue banner
+light blue candle
+light blue concrete
+light blue concrete powder
+light blue terracotta
+light blue glazed terracotta
+light blue stained glass
+light blue stained glass pane
+light blue shulker box
+light blue wall banner
+yellow wool
+yellow carpet
+yellow bed
+yellow dye
+yellow bundle
+yellow banner
+yellow candle
+yellow concrete
+yellow concrete powder
+yellow terracotta
+yellow glazed terracotta
+yellow stained glass
+yellow stained glass pane
+yellow shulker box
+yellow wall banner
+lime wool
+lime carpet
+lime bed
+lime dye
+lime bundle
+lime banner
+lime candle
+lime concrete
+lime concrete powder
+lime terracotta
+lime glazed terracotta
+lime stained glass
+lime stained glass pane
+lime shulker box
+lime wall banner
+pink wool
+pink carpet
+pink bed
+pink dye
+pink bundle
+pink banner
+pink candle
+pink concrete
+pink concrete powder
+pink terracotta
+pink glazed terracotta
+pink stained glass
+pink stained glass pane
+pink shulker box
+pink wall banner
+gray wool
+gray carpet
+gray bed
+gray dye
+gray bundle
+gray banner
+gray candle
+gray concrete
+gray concrete powder
+gray terracotta
+gray glazed terracotta
+gray stained glass
+gray stained glass pane
+gray shulker box
+gray wall banner
+light gray wool
+light gray carpet
+light gray bed
+light gray dye
+light gray bundle
+light gray banner
+light gray candle
+light gray concrete
+light gray concrete powder
+light gray terracotta
+light gray glazed terracotta
+light gray stained glass
+light gray stained glass pane
+light gray shulker box
+light gray wall banner
+cyan wool
+cyan carpet
+cyan bed
+cyan dye
+cyan bundle
+cyan banner
+cyan candle
+cyan concrete
+cyan concrete powder
+cyan terracotta
+cyan glazed terracotta
+cyan stained glass
+cyan stained glass pane
+cyan shulker box
+cyan wall banner
+purple wool
+purple carpet
+purple bed
+purple dye
+purple bundle
+purple banner
+purple candle
+purple concrete
+purple concrete powder
+purple terracotta
+purple glazed terracotta
+purple stained glass
+purple stained glass pane
+purple shulker box
+purple wall banner
+blue wool
+blue carpet
+blue bed
+blue dye
+blue bundle
+blue banner
+blue candle
+blue concrete
+blue concrete powder
+blue terracotta
+blue glazed terracotta
+blue stained glass
+blue stained glass pane
+blue shulker box
+blue wall banner
+brown wool
+brown carpet
+brown bed
+brown dye
+brown bundle
+brown banner
+brown candle
+brown concrete
+brown concrete powder
+brown terracotta
+brown glazed terracotta
+brown stained glass
+brown stained glass pane
+brown shulker box
+brown wall banner
+green wool
+green carpet
+green bed
+green dye
+green bundle
+green banner
+green candle
+green concrete
+green concrete powder
+green terracotta
+green glazed terracotta
+green stained glass
+green stained glass pane
+green shulker box
+green wall banner
+red wool
+red carpet
+red bed
+red dye
+red bundle
+red banner
+red candle
+red concrete
+red concrete powder
+red terracotta
+red glazed terracotta
+red stained glass
+red stained glass pane
+red shulker box
+red wall banner
+black wool
+black carpet
+black bed
+black dye
+black bundle
+black banner
+black candle
+black concrete
+black concrete powder
+black terracotta
+black glazed terracotta
+black stained glass
+black stained glass pane
+black shulker box
+black wall banner
+
+# --- More common items ---
+torch
+soul torch
+lantern
+soul lantern
+redstone lamp
+sea pickle
+glow item frame
+item frame
+armor stand
+flower pot
+painting
+end rod
+chain
+iron bars
+scaffolding
+ladder
+campfire
+soul campfire
+beehive
+bee nest
+composter
+decorated pot
+suspicious sand
+suspicious gravel

@@ -316,18 +316,21 @@ async function main() {
   //   phraseMap : sorted-letters-of-whole-phrase -> original phrase  (exact match)
   //   mcWordSet : every individual word seen in an item name         (tie-breaker)
   let phraseMap = null;
+  let phraseList = null;
   let mcWordSet = null;
   const lettersKey = (s) => s.toLowerCase().replace(/[^a-z]/g, '').split('').sort().join('');
   function loadPhrases() {
     if (phraseMap) return phraseMap;
     phraseMap = new Map();
+    phraseList = [];
     mcWordSet = new Set();
     const ingest = (raw) => {
       const phrase = raw.trim();
-      if (!phrase) return;
+      if (!phrase || phrase.startsWith('#')) return; // skip blanks and comments
+      const lc = phrase.toLowerCase();
       const key = lettersKey(phrase);
-      if (key.length >= 2 && !phraseMap.has(key)) phraseMap.set(key, phrase.toLowerCase());
-      for (const w of phrase.toLowerCase().split(/\s+/)) {
+      if (key.length >= 2 && !phraseMap.has(key)) { phraseMap.set(key, lc); phraseList.push(lc); }
+      for (const w of lc.split(/\s+/)) {
         const clean = w.replace(/[^a-z]/g, '');
         if (clean.length >= 2) mcWordSet.add(clean);
       }
@@ -351,10 +354,36 @@ async function main() {
   // with the original whitespace preserved. If ANY word can't be solved, the
   // entire answer is abandoned — no single-word fallback, so the bot never
   // sends a wrong partial answer.
+  // Build a regex from a fill mask (over one or more whitespace-separated words)
+  // and find the Minecraft item name(s) that fit. This is what disambiguates
+  // multi-word fill puzzles like "_ink _u__le" -> "pink bundle", where every
+  // word has many dictionary matches and only the item list knows the real pair.
+  function matchPhraseMask(token, opts = {}) {
+    loadPhrases();
+    if (!phraseList.length) return null;
+    if (!/[_.*-]/.test(token)) return null; // no blank — nothing to fill
+    const gap = opts.exactOne ? '[a-z]' : '[a-z]{1,3}';
+    const words = token.toLowerCase().split(/\s+/).filter(Boolean);
+    const parts = words.map((w) => {
+      const masked = w.replace(/[^a-z_.*-]/g, '');
+      if (!masked) return null;
+      return masked.replace(/[.*-]/g, '[a-z]').replace(/_/g, gap);
+    });
+    if (parts.some((p) => p === null)) return null;
+    const re = new RegExp('^' + parts.join('\\s+') + '$');
+    const hits = phraseList.filter((p) => re.test(p));
+    // Prefer the shortest match — tightest fit to the mask is almost always right.
+    return hits.length ? hits.sort((a, b) => a.length - b.length)[0] : null;
+  }
+
   function solveFillBlank(token, opts = {}) {
     loadAnagrams();
     if (!wordList) return null;
     if (!token) return null;
+    // (0) Known Minecraft item name matching the whole mask wins — resolves
+    // multi-word fills that per-word dictionary matching would guess wrong.
+    const phraseHit = matchPhraseMask(token, opts);
+    if (phraseHit) return phraseHit;
     const parts = token.split(/\s+/).filter(Boolean);
     if (parts.length > 1) {
       const solved = parts.map((p) => solveFillBlank(p, opts));
