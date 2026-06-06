@@ -16,7 +16,8 @@ const TOOL_BREAK_BUFFER = 5;      // !oneblock won't use a tool with this many u
 const MINE_REACH = 4.5;           // blocks: how close the bot must be to dig the target
 const GAME_DELAY_MIN = 3000;      // !games — min delay before auto-answering a chat game (ms)
 const GAME_DELAY_MAX = 5000;      // !games — max delay before auto-answering a chat game (ms)
-const FILL_MISSING_LETTERS_ONLY = false; // fill games: send ONLY the missing letters. Stays off until a "type only the missing letters" note is seen, then auto-enables for the session.
+const FILL_MISSING_LETTERS_ONLY = false; // fill games: send ONLY the missing letters instead of the full word. Default false = always send the FULL answer (e.g. "pink bundle", not "pbnd").
+const AUTO_MISSING_LETTERS = false;      // if true, auto-switch to missing-letters-only when the server prints a "type only the missing letters" note. Default false = ignore that note, keep sending the full word.
 const WORDLIST_PATH = '/usr/share/dict/american-english-huge'; // dictionary used to solve "unscramble" games
 const CUSTOM_WORDS_PATH = './custom-words.txt'; // extra words (one per line); checked first
 const CUSTOM_TRIVIA_PATH = './custom-trivia.txt'; // extra "question keywords = answer" lines; checked first
@@ -769,12 +770,13 @@ async function main() {
     if (!text) return; // blank separator line
     const low = text.toLowerCase();
 
-    // Sticky rule: some servers want ONLY the missing letters for fill games. The
-    // note can be its own line or a parenthetical, and often arrives AFTER the
-    // puzzle — so detect it here (before asides are dropped) and remember it for
-    // the rest of the session. scheduleFill re-checks this flag at send time, so
-    // even the round the note first appears in gets answered correctly.
-    if (!fillMissingOnly && /missing letter|only the (?:missing )?letters|just the (?:missing )?letters/.test(low)) {
+    // Sticky rule: some servers want ONLY the missing letters for fill games, and
+    // print a note like "(type only the missing letters)". By default we IGNORE
+    // that note and always send the full word (AUTO_MISSING_LETTERS = false) — the
+    // full answer is what wins on this server. Flip AUTO_MISSING_LETTERS to true
+    // (or set FILL_MISSING_LETTERS_ONLY) if you ever want the missing-letters mode.
+    if (AUTO_MISSING_LETTERS && !fillMissingOnly &&
+        /missing letter|only the (?:missing )?letters|just the (?:missing )?letters/.test(low)) {
       fillMissingOnly = true;
       ui.info('Fill mode', 'server wants only the missing letters');
     }
