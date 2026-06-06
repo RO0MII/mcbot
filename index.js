@@ -811,11 +811,14 @@ async function main() {
       // A dash/star/dot is a marker only when followed by whitespace; attached to a
       // digit (-7, .5) it's part of the expression.
       const payload = text.replace(/^(?:[\s▶►»➤→•·:]|[-*.](?=\s))+/, '').trim();
-      const tokenGame = pendingGame === 'unscramble' || pendingGame === 'reverse';
       // unscramble / reverse can span multiple words ("adDe buTe olarC") — strip
       // spaces before testing so a multi-word payload still counts as a payload.
       const tokenPayload = payload.replace(/\s+/g, '');
-      const looksLikePayload = tokenGame ? /^[a-z]{2,}$/i.test(tokenPayload)
+      // Reverse just flips the string, so its puzzle is often a random code with
+      // DIGITS ("NKvkd0x3v") — accept alphanumerics, not letters-only. Unscramble
+      // needs real words, so it stays letters-only.
+      const looksLikePayload = pendingGame === 'reverse' ? /^[a-z0-9]{2,}$/i.test(tokenPayload)
+        : pendingGame === 'unscramble' ? /^[a-z]{2,}$/i.test(tokenPayload)
         : pendingGame === 'math' ? /\d/.test(payload)
         : payload.length >= 2; // fill / type: accept any non-empty line
       if (looksLikePayload) {
