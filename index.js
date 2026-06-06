@@ -871,6 +871,7 @@ async function main() {
           ['!pos', 'Show current coordinates'],
           ['!health', 'Show health & hunger'],
           ['!players', 'List online players'],
+          ['!sco', 'Show the server sidebar scoreboard'],
           ['!follow <name>', 'Follow a player'],
           ['!oneblock x y z', 'Mine a block on loop (tool-safe)'],
           ['!oneblock stop', 'Stop one-block mining'],
@@ -926,6 +927,41 @@ async function main() {
         if (!connected) { console.log(notConnected); break; }
         const names = Object.keys(bot.players);
         ui.info(`Online (${names.length})`, names.join(', '));
+        break;
+      }
+
+      case 'sco':
+      case 'scoreboard': {
+        if (!connected) { console.log(notConnected); break; }
+        // The server's sidebar is the scoreboard shown in display slot 1.
+        const sb = bot.scoreboard && bot.scoreboard.sidebar;
+        if (!sb) { ui.warn('No scoreboard', 'the server is not showing a sidebar right now'); break; }
+        // Each item's displayName is the visible line (team prefix/suffix applied);
+        // items are already sorted by score so the order matches the in-game board.
+        const lines = sb.items.map((it) => {
+          let txt;
+          try { txt = it.displayName ? it.displayName.toString() : it.name; }
+          catch (_) { txt = it.name; }
+          return String(txt || '').replace(/\s+$/, '');
+        });
+        let title;
+        try { title = sb.title && sb.title.toString ? sb.title.toString() : String(sb.title || ''); }
+        catch (_) { title = ''; }
+        title = title.trim() || sb.name || 'Scoreboard';
+        // Render a full-width framed box (drawBox is two-column, so do it inline).
+        const bar = '─'.repeat(BOX_W);
+        const fit = (s, w) => (s.length > w ? s.slice(0, w) : s.padEnd(w));
+        console.log('');
+        console.log(`  ${c.blue}╭${bar}╮${c.reset}`);
+        console.log(`  ${c.blue}│${c.reset} ${c.bold}${c.magenta}${fit('📋 ' + title, BOX_W - 1)}${c.reset}${c.blue}│${c.reset}`);
+        console.log(`  ${c.blue}├${bar}┤${c.reset}`);
+        if (!lines.length) {
+          console.log(`  ${c.blue}│${c.reset} ${c.gray}${fit('(empty)', BOX_W - 1)}${c.reset}${c.blue}│${c.reset}`);
+        } else {
+          for (const t of lines) console.log(`  ${c.blue}│${c.reset} ${c.white}${fit(t, BOX_W - 1)}${c.reset}${c.blue}│${c.reset}`);
+        }
+        console.log(`  ${c.blue}╰${bar}╯${c.reset}`);
+        console.log('');
         break;
       }
 
