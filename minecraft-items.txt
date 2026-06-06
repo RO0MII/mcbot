@@ -595,3 +595,83 @@ composter
 decorated pot
 suspicious sand
 suspicious gravel
+
+# --- Spawn Eggs ---
+allay spawn egg
+axolotl spawn egg
+bat spawn egg
+bee spawn egg
+blaze spawn egg
+bogged spawn egg
+breeze spawn egg
+camel spawn egg
+cat spawn egg
+cave spider spawn egg
+chicken spawn egg
+cod spawn egg
+cow spawn egg
+creeper spawn egg
+dolphin spawn egg
+donkey spawn egg
+drowned spawn egg
+elder guardian spawn egg
+ender dragon spawn egg
+enderman spawn egg
+endermite spawn egg
+evoker spawn egg
+fox spawn egg
+frog spawn egg
+ghast spawn egg
+glow squid spawn egg
+goat spawn egg
+guardian spawn egg
+hoglin spawn egg
+horse spawn egg
+husk spawn egg
+iron golem spawn egg
+llama spawn egg
+magma cube spawn egg
+mooshroom spawn egg
+mule spawn egg
+ocelot spawn egg
+panda spawn egg
+parrot spawn egg
+phantom spawn egg
+pig spawn egg
+piglin spawn egg
+piglin brute spawn egg
+pillager spawn egg
+polar bear spawn egg
+pufferfish spawn egg
+rabbit spawn egg
+ravager spawn egg
+salmon spawn egg
+sheep spawn egg
+shulker spawn egg
+silverfish spawn egg
+skeleton spawn egg
+skeleton horse spawn egg
+slime spawn egg
+snow golem spawn egg
+spider spawn egg
+squid spawn egg
+stray spawn egg
+strider spawn egg
+tadpole spawn egg
+trader llama spawn egg
+tropical fish spawn egg
+turtle spawn egg
+vex spawn egg
+villager spawn egg
+vindicator spawn egg
+wandering trader spawn egg
+warden spawn egg
+witch spawn egg
+wither spawn egg
+wither skeleton spawn egg
+wolf spawn egg
+zoglin spawn egg
+zombie spawn egg
+zombie horse spawn egg
+zombie pigman spawn egg
+zombie villager spawn egg
