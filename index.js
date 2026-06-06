@@ -20,7 +20,7 @@ const WORDLIST_PATH = '/usr/share/dict/words'; // dictionary used to solve "unsc
 
 // ---- Auto login + server switch ----
 const AUTO_LOGIN = true;                  // detect a login prompt in chat and log in automatically
-const LOGIN_PASSWORD = 'romi322';         // password sent as "/login <password>"
+const LOGIN_PASSWORD = 'romi321';         // password sent as "/login <password>"
 const LOGIN_COMMAND = `/login ${LOGIN_PASSWORD}`;
 const SWITCH_COMMAND = '/server oneblock';// command that moves us to the target sub-server
 const SWITCH_AFTER_LOGIN = 4000;          // ms after logging in before switching servers
