@@ -1046,9 +1046,11 @@ async function main() {
   }
 
   // Send an answer after a human-like random delay (once per puzzle).
+  // The server wants Title Case — capitalize the first letter of each word.
+  function toTitleCase(s) { return s.replace(/\b[a-z]/g, (c) => c.toUpperCase()); }
   function scheduleAnswer(answer, kind) {
     if (answer === null || answer === undefined || answer === '') return;
-    const out = String(answer);
+    const out = toTitleCase(String(answer));
     const delay = GAME_DELAY_MIN + Math.floor(Math.random() * (GAME_DELAY_MAX - GAME_DELAY_MIN + 1));
     ui.info(`Game: ${kind}`, `answering "${out}" in ${(delay / 1000).toFixed(1)}s`);
     setTimeout(() => {
@@ -1105,8 +1107,9 @@ async function main() {
       if (!gameMode || !bot || !bot.player) return;
       const r = resolveFill(token, fillMissingOnly);
       if (!r || !r.send) { ui.warn('Fill unsolved', token); return; }
-      const note = r.missing ? `${c.white}${r.send}${c.gray} (missing letters of ${r.full})` : `${c.white}${r.send}`;
-      try { bot.chat(r.send); ui.ok('Answer sent', note); } catch (_) {}
+      const send = toTitleCase(r.send);
+      const note = r.missing ? `${c.white}${send}${c.gray} (missing letters of ${r.full})` : `${c.white}${send}`;
+      try { bot.chat(send); ui.ok('Answer sent', note); } catch (_) {}
     }, delay);
   }
 

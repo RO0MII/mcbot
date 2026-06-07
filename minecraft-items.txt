@@ -1,7 +1,7 @@
 # Minecraft block/item names for unscramble & fill chat games (one per line).
 # Lines starting with # are comments. Multi-word lines are matched as whole phrases.
-# Sources: minecraft-data 1.21.4 (all items+blocks) + mowinpeople.com item list.
-# Add your own server-specific names anywhere below — picked up the same way.
+# Sources: minecraft-data 1.21.4 + mowinpeople.com full item list (refreshed).
+# Add server-specific names anywhere below — picked up the same way.
 
 acacia boat
 acacia boat with chest
