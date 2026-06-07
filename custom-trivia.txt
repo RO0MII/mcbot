@@ -26,7 +26,6 @@ how many hearts does a player have = 10
 # 12 eyes of ender fill the portal; 1 blaze rod = 2 blaze powder = 2 eyes, so 6 rods.
 # If the server expects a different number, change the 6 below.
 blaze rods stronghold = 6
-how many blaze rods stronghold = 6
 how many end portal frames = 12
 how many obsidian nether portal = 10
 minimum obsidian nether portal = 10
@@ -37,3 +36,6 @@ tallest mob = Enderman
 what block absorbs water = Sponge
 what food never rots = Golden Apple
 how many bookshelves max enchanting = 15
+cure zombie villager = Golden Apple
+item cure zombie villager = Golden Apple
+need cure zombie = Golden Apple
