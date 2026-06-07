@@ -1048,6 +1048,9 @@ async function main() {
   }
 
   // Send an answer after a human-like random delay (once per puzzle).
+  // For guess-number games the answer must go to global/public chat, so team chat
+  // is toggled off first, the answer is sent, then team chat is re-enabled.
+  // All other game types (unscramble, fill, trivia, reverse, math) stay in team chat.
   function scheduleAnswer(answer, kind) {
     if (answer === null || answer === undefined || answer === '') return;
     const out = String(answer);
@@ -1055,7 +1058,20 @@ async function main() {
     ui.info(`Game: ${kind}`, `answering "${out}" in ${(delay / 1000).toFixed(1)}s`);
     setTimeout(() => {
       if (!gameMode || !bot || !bot.player) return;
-      try { bot.chat(out); ui.ok('Answer sent', `${c.white}${out}`); } catch (_) {}
+      if (kind === 'guess') {
+        // Toggle team chat OFF so the answer reaches global chat.
+        try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {}
+        setTimeout(() => {
+          if (!bot || !bot.player) return;
+          try { bot.chat(out); ui.ok('Answer sent (global)', `${c.white}${out}`); } catch (_) {}
+          // Re-enable team chat after the answer is sent.
+          setTimeout(() => {
+            if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {} }
+          }, 800);
+        }, 500);
+      } else {
+        try { bot.chat(out); ui.ok('Answer sent', `${c.white}${out}`); } catch (_) {}
+      }
     }, delay);
   }
 
