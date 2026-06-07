@@ -193,6 +193,7 @@ async function main() {
   let mining = null;     // { pos: Vec3 } while !oneblock is running, or null
   let gameMode = false;  // true while !games auto-answering is on
   let fillMissingOnly = FILL_MISSING_LETTERS_ONLY; // sticky: send only the missing letters for fill games
+  let suppressTeamchatRestore = false; // true while a game answer is intentionally toggling teamchat
 
   const notConnected = `  ${c.orange}▲${c.reset} ${c.orange}${c.bold}Not connected${c.reset} ${c.gray}— wait for "JOINED THE SERVER".${c.reset}`;
 
@@ -1063,11 +1064,13 @@ async function main() {
         try { bot.chat(out); ui.ok('Answer sent (team)', `${c.white}${out}`); } catch (_) {}
       } else {
         // All other games: toggle off team chat → send to global → re-enable.
+        suppressTeamchatRestore = true;
         try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {}
         setTimeout(() => {
           if (!bot || !bot.player) return;
           try { bot.chat(out); ui.ok('Answer sent (global)', `${c.white}${out}`); } catch (_) {}
           setTimeout(() => {
+            suppressTeamchatRestore = false;
             if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {} }
           }, 800);
         }, 500);
@@ -1125,11 +1128,13 @@ async function main() {
       if (!r || !r.send) { ui.warn('Fill unsolved', token); return; }
       const note = r.missing ? `${c.white}${r.send}${c.gray} (missing letters of ${r.full})` : `${c.white}${r.send}`;
       // Fill answers go to global chat (toggle team chat off, send, re-enable).
+      suppressTeamchatRestore = true;
       try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {}
       setTimeout(() => {
         if (!bot || !bot.player) return;
         try { bot.chat(r.send); ui.ok('Answer sent (global)', note); } catch (_) {}
         setTimeout(() => {
+          suppressTeamchatRestore = false;
           if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {} }
         }, 800);
       }, 500);
@@ -1592,7 +1597,8 @@ async function main() {
         }
       }
       // If the server untoggled our team chat (e.g. after a reset), re-toggle it immediately.
-      if (/team\s*chat\s*is\s*untoggled/i.test(message)) {
+      // Skip this when a game answer intentionally toggled it off (suppressTeamchatRestore).
+      if (!suppressTeamchatRestore && /team\s*chat\s*is\s*untoggled/i.test(message)) {
         setTimeout(() => {
           if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); ui.ok('Team chat re-toggled', 'server cleared it, sent it again'); } catch (_) {} }
         }, 1500);
