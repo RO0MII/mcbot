@@ -1,7 +1,7 @@
 # Minecraft block/item names for unscramble & fill chat games (one per line).
 # Lines starting with # are comments. Multi-word lines are matched as whole phrases.
-# Bulk list generated from minecraft-data 1.21.4 (all items + blocks); add your own
-# server-specific names anywhere below — they are picked up the same way.
+# Sources: minecraft-data 1.21.4 (all items+blocks) + mowinpeople.com item list.
+# Add your own server-specific names anywhere below — picked up the same way.
 
 acacia boat
 acacia boat with chest
@@ -15,6 +15,7 @@ acacia log
 acacia planks
 acacia pressure plate
 acacia sapling
+acacia shelf
 acacia sign
 acacia slab
 acacia stairs
@@ -61,6 +62,7 @@ bamboo planks
 bamboo pressure plate
 bamboo raft
 bamboo raft with chest
+bamboo shelf
 bamboo shoot
 bamboo sign
 bamboo slab
@@ -94,6 +96,7 @@ birch log
 birch planks
 birch pressure plate
 birch sapling
+birch shelf
 birch sign
 birch slab
 birch stairs
@@ -108,6 +111,7 @@ black concrete
 black concrete powder
 black dye
 black glazed terracotta
+black harness
 black shulker box
 black stained glass
 black stained glass pane
@@ -148,7 +152,9 @@ blue carpet
 blue concrete
 blue concrete powder
 blue dye
+blue egg
 blue glazed terracotta
+blue harness
 blue ice
 blue orchid
 blue shulker box
@@ -191,7 +197,9 @@ brown carpet
 brown concrete
 brown concrete powder
 brown dye
+brown egg
 brown glazed terracotta
+brown harness
 brown mushroom
 brown mushroom block
 brown shulker box
@@ -216,7 +224,9 @@ bucket of tropical fish
 budding amethyst
 bundle
 burn pottery sherd
+bush
 cactus
+cactus flower
 cake
 cake with black candle
 cake with blue candle
@@ -269,6 +279,7 @@ cherry log
 cherry planks
 cherry pressure plate
 cherry sapling
+cherry shelf
 cherry sign
 cherry slab
 cherry stairs
@@ -325,12 +336,31 @@ cooked rabbit
 cooked salmon
 cookie
 copper
+copper axe
+copper bars
 copper block
+copper boots
 copper bulb
+copper chain
+copper chest
+copper chestplate
 copper door
+copper golem statue
 copper grate
+copper helmet
+copper hoe
+copper horse armor
 copper ingot
+copper lantern
+copper leggings
+copper nautilus armor
+copper nugget
 copper ore
+copper pickaxe
+copper shovel
+copper spear
+copper sword
+copper torch
 copper trapdoor
 cornflower
 cow spawn egg
@@ -357,6 +387,7 @@ crimson nylium
 crimson planks
 crimson pressure plate
 crimson roots
+crimson shelf
 crimson sign
 crimson slab
 crimson stairs
@@ -380,6 +411,7 @@ cyan concrete
 cyan concrete powder
 cyan dye
 cyan glazed terracotta
+cyan harness
 cyan shulker box
 cyan stained glass
 cyan stained glass pane
@@ -401,6 +433,7 @@ dark oak log
 dark oak planks
 dark oak pressure plate
 dark oak sapling
+dark oak shelf
 dark oak sign
 dark oak slab
 dark oak stairs
@@ -419,6 +452,7 @@ dead bubble coral block
 dead bubble coral fan
 dead bubble coral wall fan
 dead bush
+dead coral block
 dead fire coral
 dead fire coral block
 dead fire coral fan
@@ -459,9 +493,11 @@ diamond helmet
 diamond hoe
 diamond horse armor
 diamond leggings
+diamond nautilus armor
 diamond ore
 diamond pickaxe
 diamond shovel
+diamond spear
 diamond sword
 diorite
 diorite slab
@@ -477,6 +513,7 @@ dragon breath
 dragon egg
 dragon head
 dragon's breath
+dried ghast
 dried kelp
 dried kelp block
 dripstone block
@@ -514,13 +551,19 @@ experience bottle
 explorer pottery sherd
 exposed chiseled copper
 exposed copper
+exposed copper bars
 exposed copper bulb
+exposed copper chain
+exposed copper chest
 exposed copper door
+exposed copper golem statue
 exposed copper grate
+exposed copper lantern
 exposed copper trapdoor
 exposed cut copper
 exposed cut copper slab
 exposed cut copper stairs
+exposed lightning rod
 eye armor trim
 eye of ender
 farmland
@@ -534,6 +577,7 @@ fire coral
 fire coral block
 fire coral fan
 fire coral wall fan
+firefly bush
 firework rocket
 firework star
 fishing rod
@@ -553,6 +597,7 @@ frog spawn egg
 frogspawn
 frosted ice
 furnace
+gear
 ghast spawn egg
 ghast tear
 gilded blackstone
@@ -582,8 +627,10 @@ golden helmet
 golden hoe
 golden horse armor
 golden leggings
+golden nautilus armor
 golden pickaxe
 golden shovel
+golden spear
 golden sword
 granite
 granite slab
@@ -600,6 +647,7 @@ gray concrete
 gray concrete powder
 gray dye
 gray glazed terracotta
+gray harness
 gray shulker box
 gray stained glass
 gray stained glass pane
@@ -615,6 +663,7 @@ green concrete
 green concrete powder
 green dye
 green glazed terracotta
+green harness
 green shulker box
 green stained glass
 green stained glass pane
@@ -643,6 +692,7 @@ horn coral
 horn coral block
 horn coral fan
 horn coral wall fan
+horse saddle
 horse spawn egg
 host armor trim
 howl pottery sherd
@@ -667,10 +717,12 @@ iron hoe
 iron horse armor
 iron ingot
 iron leggings
+iron nautilus armor
 iron nugget
 iron ore
 iron pickaxe
 iron shovel
+iron spear
 iron sword
 iron trapdoor
 item frame
@@ -689,6 +741,7 @@ jungle log
 jungle planks
 jungle pressure plate
 jungle sapling
+jungle shelf
 jungle sign
 jungle slab
 jungle stairs
@@ -706,7 +759,9 @@ large fern
 lava
 lava bucket
 lava cauldron
+lava spawner
 lead
+leaf litter
 leather
 leather boots
 leather cap
@@ -726,6 +781,7 @@ light blue concrete
 light blue concrete powder
 light blue dye
 light blue glazed terracotta
+light blue harness
 light blue shulker box
 light blue stained glass
 light blue stained glass pane
@@ -741,6 +797,7 @@ light gray concrete
 light gray concrete powder
 light gray dye
 light gray glazed terracotta
+light gray harness
 light gray shulker box
 light gray stained glass
 light gray stained glass pane
@@ -761,6 +818,7 @@ lime concrete
 lime concrete powder
 lime dye
 lime glazed terracotta
+lime harness
 lime shulker box
 lime stained glass
 lime stained glass pane
@@ -769,6 +827,7 @@ lime wall banner
 lime wool
 lingering potion
 llama spawn egg
+locked chest
 lodestone
 loom
 mace
@@ -781,6 +840,7 @@ magenta concrete
 magenta concrete powder
 magenta dye
 magenta glazed terracotta
+magenta harness
 magenta shulker box
 magenta stained glass
 magenta stained glass pane
@@ -803,6 +863,7 @@ mangrove planks
 mangrove pressure plate
 mangrove propagule
 mangrove roots
+mangrove shelf
 mangrove sign
 mangrove slab
 mangrove stairs
@@ -846,6 +907,27 @@ mule spawn egg
 mushroom stem
 mushroom stew
 music disc
+music disc (11)
+music disc (13)
+music disc (5)
+music disc (blocks)
+music disc (cat)
+music disc (chirp)
+music disc (creator (music box))
+music disc (creator)
+music disc (far)
+music disc (lava chicken)
+music disc (mall)
+music disc (mellohi)
+music disc (otherside)
+music disc (pigstep)
+music disc (precipice)
+music disc (relic)
+music disc (stal)
+music disc (strad)
+music disc (tears)
+music disc (wait)
+music disc (ward)
 mycelium
 name tag
 nautilus shell
@@ -868,11 +950,14 @@ netherite boots
 netherite chestplate
 netherite helmet
 netherite hoe
+netherite horse armor
 netherite ingot
 netherite leggings
+netherite nautilus armor
 netherite pickaxe
 netherite scrap
 netherite shovel
+netherite spear
 netherite sword
 netherite upgrade
 netherrack
@@ -889,6 +974,7 @@ oak log
 oak planks
 oak pressure plate
 oak sapling
+oak shelf
 oak sign
 oak slab
 oak stairs
@@ -898,6 +984,7 @@ observer
 obsidian
 ocelot spawn egg
 ochre froglight
+ominous banner
 ominous bottle
 ominous trial key
 open eyeblossom
@@ -910,6 +997,7 @@ orange concrete
 orange concrete powder
 orange dye
 orange glazed terracotta
+orange harness
 orange shulker box
 orange stained glass
 orange stained glass pane
@@ -920,13 +1008,19 @@ orange wool
 oxeye daisy
 oxidized chiseled copper
 oxidized copper
+oxidized copper bars
 oxidized copper bulb
+oxidized copper chain
+oxidized copper chest
 oxidized copper door
+oxidized copper golem statue
 oxidized copper grate
+oxidized copper lantern
 oxidized copper trapdoor
 oxidized cut copper
 oxidized cut copper slab
 oxidized cut copper stairs
+oxidized lightning rod
 packed ice
 packed mud
 painting
@@ -945,6 +1039,7 @@ pale oak log
 pale oak planks
 pale oak pressure plate
 pale oak sapling
+pale oak shelf
 pale oak sign
 pale oak slab
 pale oak stairs
@@ -972,6 +1067,7 @@ pink concrete
 pink concrete powder
 pink dye
 pink glazed terracotta
+pink harness
 pink petals
 pink shulker box
 pink stained glass
@@ -1090,6 +1186,7 @@ purple concrete
 purple concrete powder
 purple dye
 purple glazed terracotta
+purple harness
 purple shulker box
 purple stained glass
 purple stained glass pane
@@ -1134,6 +1231,7 @@ red concrete
 red concrete powder
 red dye
 red glazed terracotta
+red harness
 red mushroom
 red mushroom block
 red nether brick slab
@@ -1197,8 +1295,10 @@ shears
 sheep spawn egg
 shelter pottery sherd
 shield
+short dry grass
 short grass
 shroomlight
+shrub
 shulker box
 shulker shell
 shulker spawn egg
@@ -1264,6 +1364,7 @@ spruce log
 spruce planks
 spruce pressure plate
 spruce sapling
+spruce shelf
 spruce sign
 spruce slab
 spruce stairs
@@ -1286,6 +1387,7 @@ stone pickaxe
 stone pressure plate
 stone shovel
 stone slab
+stone spear
 stone stairs
 stone sword
 stonecutter
@@ -1316,6 +1418,10 @@ stripped warped hyphae
 stripped warped stem
 structure block
 structure void
+studded boots
+studded chestplate
+studded helmet
+studded leggings
 sugar
 sugar cane
 sunflower
@@ -1325,6 +1431,7 @@ suspicious stew
 sweet berries
 sweet berry bush
 tadpole spawn egg
+tall dry grass
 tall grass
 tall seagrass
 target
@@ -1390,6 +1497,7 @@ warped nylium
 warped planks
 warped pressure plate
 warped roots
+warped shelf
 warped sign
 warped slab
 warped stairs
@@ -1399,53 +1507,84 @@ warped wart block
 water
 water bucket
 water cauldron
+water spawner
 waxed block of copper
 waxed chiseled copper
+waxed copper bars
 waxed copper block
 waxed copper bulb
+waxed copper chain
+waxed copper chest
 waxed copper door
+waxed copper golem statue
 waxed copper grate
+waxed copper lantern
 waxed copper trapdoor
 waxed cut copper
 waxed cut copper slab
 waxed cut copper stairs
 waxed exposed chiseled copper
 waxed exposed copper
+waxed exposed copper bars
 waxed exposed copper bulb
+waxed exposed copper chain
+waxed exposed copper chest
 waxed exposed copper door
+waxed exposed copper golem statue
 waxed exposed copper grate
+waxed exposed copper lantern
 waxed exposed copper trapdoor
 waxed exposed cut copper
 waxed exposed cut copper slab
 waxed exposed cut copper stairs
+waxed exposed lightning rod
+waxed lightning rod
 waxed oxidized chiseled copper
 waxed oxidized copper
+waxed oxidized copper bars
 waxed oxidized copper bulb
+waxed oxidized copper chain
+waxed oxidized copper chest
 waxed oxidized copper door
+waxed oxidized copper golem statue
 waxed oxidized copper grate
+waxed oxidized copper lantern
 waxed oxidized copper trapdoor
 waxed oxidized cut copper
 waxed oxidized cut copper slab
 waxed oxidized cut copper stairs
+waxed oxidized lightning rod
 waxed weathered chiseled copper
 waxed weathered copper
+waxed weathered copper bars
 waxed weathered copper bulb
+waxed weathered copper chain
+waxed weathered copper chest
 waxed weathered copper door
+waxed weathered copper golem statue
 waxed weathered copper grate
+waxed weathered copper lantern
 waxed weathered copper trapdoor
 waxed weathered cut copper
 waxed weathered cut copper slab
 waxed weathered cut copper stairs
+waxed weathered lightning rod
 wayfinder armor trim
 weathered chiseled copper
 weathered copper
+weathered copper bars
 weathered copper bulb
+weathered copper chain
+weathered copper chest
 weathered copper door
+weathered copper golem statue
 weathered copper grate
+weathered copper lantern
 weathered copper trapdoor
 weathered cut copper
 weathered cut copper slab
 weathered cut copper stairs
+weathered lightning rod
 weeping vines
 weeping vines plant
 wet sponge
@@ -1461,6 +1600,7 @@ white concrete
 white concrete powder
 white dye
 white glazed terracotta
+white harness
 white shulker box
 white stained glass
 white stained glass pane
@@ -1469,6 +1609,7 @@ white tulip
 white wall banner
 white wool
 wild armor trim
+wildflowers
 wind charge
 witch spawn egg
 wither rose
@@ -1481,6 +1622,7 @@ wooden axe
 wooden hoe
 wooden pickaxe
 wooden shovel
+wooden spear
 wooden sword
 written book
 yellow banner
@@ -1492,6 +1634,7 @@ yellow concrete
 yellow concrete powder
 yellow dye
 yellow glazed terracotta
+yellow harness
 yellow shulker box
 yellow stained glass
 yellow stained glass pane
