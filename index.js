@@ -842,9 +842,12 @@ async function main() {
   // and pick a random number in that range. Matches patterns like:
   //   "random number 1-15", "number: 1-100", "guess 1-10", "between 1 and 15"
   function solveGuessNumber(text) {
-    let m = text.match(/(?:random\s+)?number\s*[:>\]]?\s*(\d{1,3})\s*[-–to]+\s*(\d{1,3})/i);
-    if (!m) m = text.match(/between\s+(\d{1,3})(?:\s+and\s+|\s*[-–]\s*)(\d{1,3})/i);
-    if (!m) m = text.match(/(?:guess|random|number)\s.*?(\d{1,3})\s*[-–]\s*(\d{1,3})/i);
+    const SEP = /\s*(?:[-–]|to|and)\s*/i; // separator: dash, "to", or "and"
+    const R = (p) => text.match(p);
+    let m = R(new RegExp('(?:random\\s+)?number\\s*[:>\\]]?\\s*(\\d{1,3})' + SEP.source + '(\\d{1,3})', 'i'));
+    if (!m) m = R(/between\s+(\d{1,3})(?:\s+and\s+|\s*[-–]\s*)(\d{1,3})/i);
+    if (!m) m = R(new RegExp('(?:guess|random|number)\\s.*?(\\d{1,3})' + SEP.source + '(\\d{1,3})', 'i'));
+    if (!m) m = R(new RegExp('^(\\d{1,3})' + SEP.source + '(\\d{1,3})$', 'i')); // bare "1 to 14" / "1-14"
     if (m) {
       const min = parseInt(m[1]), max = parseInt(m[2]);
       if (min >= 1 && max > min && max <= 10000) {
@@ -986,7 +989,7 @@ async function main() {
     // Generic knowledge question ("first to answer the question wins"). Checked
     // last so a more specific game (math/unscramble/...) is preferred. The actual
     // question arrives on the NEXT line and is solved against the trivia table.
-    if (/guess(?:\s+the)?\s+(?:random\s+)?number/i.test(low)) return 'guess';
+    if (/guess(?:\s+the)?\s+(?:random\s+)?number|guess\s+(?:a\s+)?(?:correct\s+)?number|correct\s+number/i.test(low)) return 'guess';
     if (/\bquestion\b|answer the|trivia|guess the/.test(low)) return 'trivia';
     return null;
   }
@@ -1207,7 +1210,7 @@ async function main() {
           // Always consume the payload for guess games — never fall through to
           // the math solver (which would misread "1-15" as minus 14).
           clearPending();
-          const range = payload.match(/(\d{1,3})\s*[-–to]+\s*(\d{1,3})/i);
+          const range = payload.match(/(\d{1,3})\s*(?:[-–]|to|and)\s*(\d{1,3})/i);
           if (range) {
             const min = parseInt(range[1]), max = parseInt(range[2]);
             if (min >= 1 && max > min && max <= 10000) {
