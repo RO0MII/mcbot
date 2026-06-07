@@ -65,7 +65,8 @@ const LOBBY_RESWITCH_DELAY = 5000;    // ms to wait after a restart message befo
 // Chat lines that mean the sub-server restarted / we were sent back to the lobby.
 const LOBBY_PROMPT = /\b(restart(?:ing|ed)?|reboot(?:ing)?|sending you to|moved to (?:the )?lobby|sent to (?:the )?lobby|fell back|server is (?:going )?down|connection lost)\b/i;
 // Countdown lines the server sends just before a restart ("Server restarting in 3 2 1").
-const RESTART_COUNTDOWN = /\brestart(?:ing)?\b.*\b[123]\b|\b(?:3|2|1)\s*\.{0,3}\s*(?:2|1)\s*\.{0,3}\s*(?:1|0)\b|\brestarting soon\b/i;
+// Use \b on both sides of each single digit so "120" or "$120" never matches.
+const RESTART_COUNTDOWN = /\brestart(?:ing)?\b.*\b[123]\b|\b3\b[\s.]+\b2\b[\s.]+\b1\b|\brestarting\s+soon\b/i;
 
 // Terminal colors (truecolor for rich, vivid output)
 const rgb = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
