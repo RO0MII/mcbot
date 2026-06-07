@@ -1,3 +1,5 @@
+process.env.TZ = 'Asia/Colombo'; // run all timestamps/logs in Sri Lanka time (must be set before any Date use)
+
 const readline = require('readline');
 const fs = require('fs');
 const mineflayer = require('mineflayer');
@@ -10,6 +12,7 @@ const DEFAULT_PORT = 25565;       // Default Minecraft port
 const VERSION = '1.20.1';         // Fixed version = skip the auto-detect ping round-trip, so the FIRST join is fast. Set false to auto-detect.
 const AUTO_RECONNECT = true;      // Keep retrying while the server boots (Aternos)
 const RECONNECT_DELAY = 5000;     // ms between retries
+const DAILY_SHUTDOWN_HOUR = 4;    // hour (0-23, Asia/Colombo) to disconnect and EXIT without reconnecting; set to null to disable
 const JOIN_TIMEOUT = 30000;       // ms to wait for a join before giving up and retrying (fixes hangs)
 const AFK_INTERVAL = 8000;        // ms between anti-AFK actions when !afk is on
 const TOOL_BREAK_BUFFER = 5;      // !oneblock won't use a tool with this many uses (or fewer) left — keeps it from breaking
@@ -159,6 +162,7 @@ async function main() {
   // 3) Connect (with auto-reconnect while the server boots)
   let bot = null;
   let listenerAttached = false;
+  let shuttingDown = false; // true once the scheduled daily shutdown fires — blocks reconnect
 
   // ---- Local bot commands (the `!` commands) ----
   // These are handled here in the console and are NEVER sent to server chat.
@@ -172,6 +176,37 @@ async function main() {
 
   function stopAfk() {
     if (afkTimer) { clearInterval(afkTimer); afkTimer = null; }
+  }
+
+  // Milliseconds from now until the next HH:00:00 in Asia/Colombo (independent of
+  // the host's own timezone). Used to schedule the daily shutdown precisely.
+  function msUntilColomboHour(hour) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Colombo', hour12: false,
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(new Date());
+    const get = (t) => parseInt(parts.find((p) => p.type === t).value, 10);
+    let h = get('hour'); if (h === 24) h = 0; // some ICU builds report 24 at midnight
+    const nowSec = h * 3600 + get('minute') * 60 + get('second');
+    let diff = hour * 3600 - nowSec;
+    if (diff <= 0) diff += 24 * 3600; // already past today -> aim for tomorrow
+    return diff * 1000;
+  }
+
+  // Disconnect and EXIT at DAILY_SHUTDOWN_HOUR (Asia/Colombo), without reconnecting.
+  // The user restarts the bot manually afterwards. One-shot: the process exits.
+  function scheduleDailyShutdown() {
+    if (DAILY_SHUTDOWN_HOUR == null) return;
+    const ms = msUntilColomboHour(DAILY_SHUTDOWN_HOUR);
+    ui.info('Auto-shutdown armed', `disconnecting at ${String(DAILY_SHUTDOWN_HOUR).padStart(2, '0')}:00 Asia/Colombo (in ${(ms / 3600000).toFixed(1)}h)`);
+    setTimeout(() => {
+      shuttingDown = true; // stop the 'end' handler from reconnecting
+      console.log(`\n  ${c.yellow}● ${String(DAILY_SHUTDOWN_HOUR).padStart(2, '0')}:00 Asia/Colombo${c.reset} ${c.gray}— scheduled shutdown. Disconnecting and exiting (no reconnect).${c.reset}`);
+      stopAfk();
+      try { if (bot) bot.quit(); } catch (_) {}
+      try { rl.close(); } catch (_) {}
+      process.exit(0);
+    }, ms);
   }
 
   // Anti-AFK: small harmless movements so the server never marks us idle.
@@ -1146,6 +1181,7 @@ async function main() {
       if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
       if (reswitchTimer) { clearTimeout(reswitchTimer); reswitchTimer = null; }
       if (mining) mining = null; // stop the mine loop; the old bot is gone
+      if (shuttingDown) return;  // scheduled daily shutdown — do NOT reconnect
       if (!joined) {
         if (offline) {
           console.log(`  ${c.orange}●${c.reset} ${c.orange}${c.bold}Server offline${c.reset} ${c.gray}— not reachable right now.${c.reset}`);
@@ -1193,6 +1229,7 @@ async function main() {
     }
   }
 
+  scheduleDailyShutdown();
   connect();
 }
 
