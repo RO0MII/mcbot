@@ -64,6 +64,8 @@ const RESWITCH_MAX = 10 * 60 * 1000;  // ...and at most this often
 const LOBBY_RESWITCH_DELAY = 5000;    // ms to wait after a restart message before re-switching
 // Chat lines that mean the sub-server restarted / we were sent back to the lobby.
 const LOBBY_PROMPT = /\b(restart(?:ing|ed)?|reboot(?:ing)?|sending you to|moved to (?:the )?lobby|sent to (?:the )?lobby|fell back|server is (?:going )?down|connection lost)\b/i;
+// Countdown lines the server sends just before a restart ("Server restarting in 3 2 1").
+const RESTART_COUNTDOWN = /\brestart(?:ing)?\b.*\b[123]\b|\b(?:3|2|1)\s*\.{0,3}\s*(?:2|1)\s*\.{0,3}\s*(?:1|0)\b|\brestarting soon\b/i;
 
 // Terminal colors (truecolor for rich, vivid output)
 const rgb = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
@@ -403,7 +405,7 @@ async function main() {
       if (!have.length) { ui.warn('Trade aborted', 'no keys/candles to trade'); return; }
 
       // 2) Send the trade request and wait for the owner to accept (window opens).
-      const tradeCmd = `/trade ${TRADE_OWNER}`;
+      const tradeCmd = `/trade invite ${TRADE_OWNER}`;
       ui.info('Trade', `sending ${tradeCmd} — waiting up to ${TRADE_ACCEPT_TIMEOUT / 1000}s for accept`);
       const win = await openCommandWindow(tradeCmd, TRADE_ACCEPT_TIMEOUT);
       if (!win) { ui.warn('Trade aborted', `${TRADE_OWNER} did not accept in time`); return; }
@@ -1476,7 +1478,7 @@ async function main() {
       // Auto-login: the server asks us to authenticate -> send LOGIN_COMMAND.
       if (AUTO_LOGIN && !loggedIn && LOGIN_PROMPT.test(message)) doLogin();
       // Restart / "sent to lobby" -> re-join oneblock fast (debounced 30s).
-      if (AUTO_LOGIN && LOBBY_PROMPT.test(message)) {
+      if (AUTO_LOGIN && (LOBBY_PROMPT.test(message) || RESTART_COUNTDOWN.test(message))) {
         const now = Date.now();
         if (now - lobbyReswitchAt > 30000) {
           lobbyReswitchAt = now;
@@ -1485,6 +1487,12 @@ async function main() {
             if (bot && bot.player) { try { bot.chat(SWITCH_COMMAND); ui.ok('Re-join oneblock', SWITCH_COMMAND); } catch (_) {} scheduleTeamchat(); }
           }, LOBBY_RESWITCH_DELAY);
         }
+      }
+      // If the server untoggled our team chat (e.g. after a reset), re-toggle it immediately.
+      if (/team\s*chat\s*is\s*untoggled/i.test(message)) {
+        setTimeout(() => {
+          if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); ui.ok('Team chat re-toggled', 'server cleared it, sent it again'); } catch (_) {} }
+        }, 1500);
       }
       if (gameMode) maybeAnswerGame(message); // auto-answer chat games when !games is on
       // Fallback whisper trigger for custom /msg formats (native 'whisper' covers vanilla).
