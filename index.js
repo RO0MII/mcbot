@@ -1057,17 +1057,15 @@ async function main() {
     ui.info(`Game: ${kind}`, `answering "${out}" in ${(delay / 1000).toFixed(1)}s`);
     setTimeout(() => {
       if (!gameMode || !bot || !bot.player) return;
-      try {
-        if (teamchatOn) { bot.chat(TEAMCHAT_COMMAND); teamchatOn = false; }
+      const needToggle = teamchatOn; // capture BEFORE changing state
+      if (needToggle) { try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {} teamchatOn = false; }
+      setTimeout(() => {
+        if (!bot || !bot.player) return;
+        try { bot.chat(out); ui.ok('Answer sent', `${c.white}${out}`); } catch (_) {}
         setTimeout(() => {
-          if (!bot || !bot.player) return;
-          try { bot.chat(out); ui.ok('Answer sent', `${c.white}${out}`); } catch (_) {}
-          // Re-enable team chat shortly after so it stays on for normal chat.
-          setTimeout(() => {
-            if (bot && bot.player && !teamchatOn) { try { bot.chat(TEAMCHAT_COMMAND); teamchatOn = true; } catch (_) {} }
-          }, 800);
-        }, teamchatOn ? 400 : 0);
-      } catch (_) {}
+          if (bot && bot.player && !teamchatOn) { try { bot.chat(TEAMCHAT_COMMAND); teamchatOn = true; } catch (_) {} }
+        }, 800);
+      }, needToggle ? 500 : 0); // wait for toggle to register on the server
     }, delay);
   }
 
@@ -1120,16 +1118,15 @@ async function main() {
       const r = resolveFill(token, fillMissingOnly);
       if (!r || !r.send) { ui.warn('Fill unsolved', token); return; }
       const note = r.missing ? `${c.white}${r.send}${c.gray} (missing letters of ${r.full})` : `${c.white}${r.send}`;
-      try {
-        if (teamchatOn) { bot.chat(TEAMCHAT_COMMAND); teamchatOn = false; }
+      const needToggle = teamchatOn;
+      if (needToggle) { try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {} teamchatOn = false; }
+      setTimeout(() => {
+        if (!bot || !bot.player) return;
+        try { bot.chat(r.send); ui.ok('Answer sent', note); } catch (_) {}
         setTimeout(() => {
-          if (!bot || !bot.player) return;
-          try { bot.chat(r.send); ui.ok('Answer sent', note); } catch (_) {}
-          setTimeout(() => {
-            if (bot && bot.player && !teamchatOn) { try { bot.chat(TEAMCHAT_COMMAND); teamchatOn = true; } catch (_) {} }
-          }, 800);
-        }, teamchatOn ? 400 : 0);
-      } catch (_) {}
+          if (bot && bot.player && !teamchatOn) { try { bot.chat(TEAMCHAT_COMMAND); teamchatOn = true; } catch (_) {} }
+        }, 800);
+      }, needToggle ? 500 : 0);
     }, delay);
   }
 
