@@ -192,6 +192,7 @@ async function main() {
   let mining = null;     // { pos: Vec3 } while !oneblock is running, or null
   let gameMode = false;  // true while !games auto-answering is on
   let fillMissingOnly = FILL_MISSING_LETTERS_ONLY; // sticky: send only the missing letters for fill games
+  let teamchatOn = false; // true after /teamchat is sent; game answers toggle it off/on
 
   const notConnected = `  ${c.orange}▲${c.reset} ${c.orange}${c.bold}Not connected${c.reset} ${c.gray}— wait for "JOINED THE SERVER".${c.reset}`;
 
@@ -1047,6 +1048,8 @@ async function main() {
   }
 
   // Send an answer after a human-like random delay (once per puzzle).
+  // If team chat is on, toggles it off before sending and back on after,
+  // so the answer goes to public chat (not team chat).
   function scheduleAnswer(answer, kind) {
     if (answer === null || answer === undefined || answer === '') return;
     const out = String(answer);
@@ -1054,7 +1057,17 @@ async function main() {
     ui.info(`Game: ${kind}`, `answering "${out}" in ${(delay / 1000).toFixed(1)}s`);
     setTimeout(() => {
       if (!gameMode || !bot || !bot.player) return;
-      try { bot.chat(out); ui.ok('Answer sent', `${c.white}${out}`); } catch (_) {}
+      try {
+        if (teamchatOn) { bot.chat(TEAMCHAT_COMMAND); teamchatOn = false; }
+        setTimeout(() => {
+          if (!bot || !bot.player) return;
+          try { bot.chat(out); ui.ok('Answer sent', `${c.white}${out}`); } catch (_) {}
+          // Re-enable team chat shortly after so it stays on for normal chat.
+          setTimeout(() => {
+            if (bot && bot.player && !teamchatOn) { try { bot.chat(TEAMCHAT_COMMAND); teamchatOn = true; } catch (_) {} }
+          }, 800);
+        }, teamchatOn ? 400 : 0);
+      } catch (_) {}
     }, delay);
   }
 
@@ -1107,7 +1120,16 @@ async function main() {
       const r = resolveFill(token, fillMissingOnly);
       if (!r || !r.send) { ui.warn('Fill unsolved', token); return; }
       const note = r.missing ? `${c.white}${r.send}${c.gray} (missing letters of ${r.full})` : `${c.white}${r.send}`;
-      try { bot.chat(r.send); ui.ok('Answer sent', note); } catch (_) {}
+      try {
+        if (teamchatOn) { bot.chat(TEAMCHAT_COMMAND); teamchatOn = false; }
+        setTimeout(() => {
+          if (!bot || !bot.player) return;
+          try { bot.chat(r.send); ui.ok('Answer sent', note); } catch (_) {}
+          setTimeout(() => {
+            if (bot && bot.player && !teamchatOn) { try { bot.chat(TEAMCHAT_COMMAND); teamchatOn = true; } catch (_) {} }
+          }, 800);
+        }, teamchatOn ? 400 : 0);
+      } catch (_) {}
     }, delay);
   }
 
@@ -1484,7 +1506,7 @@ async function main() {
       if (teamchatTimer) clearTimeout(teamchatTimer);
       teamchatTimer = setTimeout(() => {
         if (bot && bot.player) {
-          try { bot.chat(TEAMCHAT_COMMAND); ui.ok('Team chat', TEAMCHAT_COMMAND); } catch (_) {}
+          try { bot.chat(TEAMCHAT_COMMAND); teamchatOn = true; ui.ok('Team chat', TEAMCHAT_COMMAND); } catch (_) {}
         }
       }, TEAMCHAT_DELAY);
     }
@@ -1568,8 +1590,9 @@ async function main() {
       }
       // If the server untoggled our team chat (e.g. after a reset), re-toggle it immediately.
       if (/team\s*chat\s*is\s*untoggled/i.test(message)) {
+        teamchatOn = false;
         setTimeout(() => {
-          if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); ui.ok('Team chat re-toggled', 'server cleared it, sent it again'); } catch (_) {} }
+          if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); teamchatOn = true; ui.ok('Team chat re-toggled', 'server cleared it, sent it again'); } catch (_) {} }
         }, 1500);
       }
       if (gameMode) maybeAnswerGame(message); // auto-answer chat games when !games is on
