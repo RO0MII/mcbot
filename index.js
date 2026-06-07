@@ -19,7 +19,7 @@ const AUTO_VAULT = true;                       // run the deposit+trash cycle on
 const VAULT_INTERVAL = 10 * 60 * 1000;         // every 10 minutes
 const VAULT_PV_COMMAND = '/pv 1';              // command that opens the player-vault GUI to deposit into
 const VAULT_TRASH_COMMAND = '/trash';          // command that opens the trash GUI (deposited items are destroyed)
-const VAULT_KEEP = ['pink candle', 'party key']; // these go to the vault; EVERYTHING ELSE in the inventory is trashed
+const VAULT_KEEP = ['party key', 'candle']; // these go to the vault; EVERYTHING ELSE in the inventory is trashed
 
 // ---- Auto-trade: when the owner whispers a trigger word, give them the keys+candles ----
 const TRADE_ENABLED = true;                     // master switch for the whisper-triggered trade
@@ -50,6 +50,8 @@ const LOGIN_COMMAND = `/login ${LOGIN_PASSWORD}`;
 const SWITCH_COMMAND = '/server oneblock';// command that moves us to the target sub-server
 const SWITCH_AFTER_LOGIN = 4000;          // ms after logging in before switching servers
 const SWITCH_FALLBACK = 8000;             // ms after joining to switch anyway (login prompt or not)
+const TEAMCHAT_COMMAND = '/teamchat';     // sent after switching, joins team chat
+const TEAMCHAT_DELAY = 5000;              // ms after switch before sending teamchat
 // Chat lines that mean "you must authenticate" — triggers LOGIN_COMMAND.
 const LOGIN_PROMPT = /\b(login|loggin|log in|register|registro|authme|password)\b/i;
 
@@ -791,6 +793,23 @@ async function main() {
     return null;
   }
 
+  // Solve "guess the random number" games — extract min/max from the message
+  // and pick a random number in that range. Matches patterns like:
+  //   "random number 1-15", "number: 1-100", "guess 1-10", "between 1 and 15"
+  function solveGuessNumber(text) {
+    let m = text.match(/(?:random\s+)?number\s*[:>\]]?\s*(\d{1,3})\s*[-–to]+\s*(\d{1,3})/i);
+    if (!m) m = text.match(/between\s+(\d{1,3})(?:\s+and\s+|\s*[-–]\s*)(\d{1,3})/i);
+    if (!m) m = text.match(/(?:guess|random|number)\s.*?(\d{1,3})\s*[-–]\s*(\d{1,3})/i);
+    if (m) {
+      const min = parseInt(m[1]), max = parseInt(m[2]);
+      if (min >= 1 && max > min && max <= 10000) {
+        const answer = String(min + Math.floor(Math.random() * (max - min + 1)));
+        return { answer, kind: 'guess' };
+      }
+    }
+    return null;
+  }
+
   // Given a chat line, work out the answer to a game — or null if it's not one we solve.
   // Returns { answer, kind } so the console can label what it solved.
   function solveGame(msg) {
@@ -884,7 +903,11 @@ async function main() {
       if (ans) return { answer: ans, kind: 'fill-blank', mask: m[1] };
     }
 
-    // 5) Trivia — a small built-in table of common questions (offline-safe).
+    // 5) Guess the number — "random number 1-15" / "guess a number between 1 and 10"
+    const guess = solveGuessNumber(text);
+    if (guess) return guess;
+
+    // 6) Trivia — a small built-in table of common questions (offline-safe).
     const triv = solveTrivia(low);
     if (triv) return { answer: triv, kind: 'trivia' };
 
@@ -894,7 +917,7 @@ async function main() {
   // Some games announce the TYPE on one line ("The first to unreverse the
   // letters wins!") and send the actual puzzle on a LATER line ("▶ ngiS ..").
   // We remember the announced operation and apply it to the next payload line.
-  let pendingGame = null;   // 'reverse' | 'unscramble' | 'math' | 'fill' | 'type'
+  let pendingGame = null;   // 'reverse' | 'unscramble' | 'math' | 'fill' | 'type' | 'trivia' | 'guess'
   let pendingTimer = null;  // forgets the pending op if no payload arrives in time
 
   function setPending(kind) {
@@ -918,6 +941,7 @@ async function main() {
     // Generic knowledge question ("first to answer the question wins"). Checked
     // last so a more specific game (math/unscramble/...) is preferred. The actual
     // question arrives on the NEXT line and is solved against the trivia table.
+    if (/guess(?:\s+the)?\s+(?:random\s+)?number/i.test(low)) return 'guess';
     if (/\bquestion\b|answer the|trivia|guess the/.test(low)) return 'trivia';
     return null;
   }
@@ -966,6 +990,10 @@ async function main() {
       case 'fill':       return solveFillBlank(payload);
       case 'type':       return payload;
       case 'trivia':     return solveTrivia(payload.toLowerCase());
+      case 'guess': {
+        const r = solveGuessNumber(payload);
+        return r ? r.answer : null;
+      }
       default:           return null;
     }
   }
@@ -1101,6 +1129,18 @@ async function main() {
           // the pending op armed for a later line. scheduleFill resolves the
           // full-word-vs-missing-letters choice at send time.
           if (solveFillBlank(payload)) { clearPending(); return scheduleFill(payload); }
+        } else if (pendingGame === 'guess') {
+          // Always consume the payload for guess games — never fall through to
+          // the math solver (which would misread "1-15" as minus 14).
+          clearPending();
+          const range = payload.match(/(\d{1,3})\s*[-–to]+\s*(\d{1,3})/i);
+          if (range) {
+            const min = parseInt(range[1]), max = parseInt(range[2]);
+            if (min >= 1 && max > min && max <= 10000) {
+              return scheduleAnswer(String(min + Math.floor(Math.random() * (max - min + 1))), 'guess');
+            }
+          }
+          return; // consume the line even if we couldn't parse it
         } else {
           const kind = pendingGame;
           clearPending();
@@ -1356,6 +1396,16 @@ async function main() {
     let switchFallback = null; // timer that switches anyway if no login prompt arrives
     let reswitchTimer = null;  // periodic "/server oneblock" so a restart bounce gets us back
     let lobbyReswitchAt = 0;   // debounce for restart-message-triggered re-switching
+    let teamchatTimer = null;  // delayed /teamchat after switching
+
+    function scheduleTeamchat() {
+      if (teamchatTimer) clearTimeout(teamchatTimer);
+      teamchatTimer = setTimeout(() => {
+        if (bot && bot.player) {
+          try { bot.chat(TEAMCHAT_COMMAND); ui.ok('Team chat', TEAMCHAT_COMMAND); } catch (_) {}
+        }
+      }, TEAMCHAT_DELAY);
+    }
 
     // Send the server-switch command exactly once per connection, then keep a
     // periodic re-send going so a later sub-server restart (which bounces us to
@@ -1366,6 +1416,7 @@ async function main() {
       if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
       try { bot.chat(SWITCH_COMMAND); ui.ok('Server switch', SWITCH_COMMAND); } catch (_) {}
       scheduleReswitch();
+      scheduleTeamchat();
     }
 
     // Re-send SWITCH_COMMAND every 5-10 min (random). On oneblock the server
@@ -1377,6 +1428,7 @@ async function main() {
       reswitchTimer = setTimeout(() => {
         if (bot && bot.player) {
           try { bot.chat(SWITCH_COMMAND); ui.info('Re-join oneblock', `${SWITCH_COMMAND} (auto, every 5-10m)`); } catch (_) {}
+          scheduleTeamchat();
         }
         scheduleReswitch(); // queue the next cycle
       }, delay);
@@ -1428,7 +1480,7 @@ async function main() {
           lobbyReswitchAt = now;
           ui.warn('Restart / lobby detected', `re-joining oneblock in ${LOBBY_RESWITCH_DELAY / 1000}s`);
           setTimeout(() => {
-            if (bot && bot.player) { try { bot.chat(SWITCH_COMMAND); ui.ok('Re-join oneblock', SWITCH_COMMAND); } catch (_) {} }
+            if (bot && bot.player) { try { bot.chat(SWITCH_COMMAND); ui.ok('Re-join oneblock', SWITCH_COMMAND); } catch (_) {} scheduleTeamchat(); }
           }, LOBBY_RESWITCH_DELAY);
         }
       }
