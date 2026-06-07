@@ -5,6 +5,15 @@ const { Client, GatewayIntentBits, PermissionFlagsBits, ChannelType } = require(
 const fs   = require('fs');
 const path = require('path');
 
+// Load .env file manually (no dotenv dependency needed)
+try {
+  const envFile = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
+  for (const line of envFile.split('\n')) {
+    const m = line.match(/^export\s+(\w+)\s*=\s*(.+)$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+  }
+} catch (_) {}
+
 // ---- Config ----
 const DISCORD_TOKEN  = process.env.DISCORD_TOKEN || ''; // set DISCORD_TOKEN env var
 const GUILD_ID       = '1500357389596098622';

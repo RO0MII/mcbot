@@ -16,3 +16,4 @@ auth.json
 Thumbs.db
 .vscode/
 .idea/
+.env
