@@ -752,6 +752,47 @@ async function main() {
   // Lazily-built, ordered list of trivia entries: { keys:[...], answer }.
   // custom-trivia.txt entries come first; then built-ins, most-specific first.
   let triviaEntries = null;
+  // ---- Self-learning trivia ----
+  let unseenTriviaQ = null;               // question we couldn't answer — waiting to learn
+  const recentPlayerMsgs = [];            // rolling buffer {username, text, ts}
+  const PLAYER_MSG_TTL = 45000;           // keep player messages for 45s
+
+  // Parse a plain player chat line → {username, text} or null.
+  // Format: "  [rank] username ▶ message" or "  username ▶ message"
+  function parsePlayerChat(line) {
+    const m = String(line).replace(/§./g, '').match(/^\s*(?:\[[^\]]+\]\s*)*([A-Za-z0-9_]{2,16})\s*▶\s*(.+)$/);
+    return m ? { username: m[1].toLowerCase(), text: m[2].trim() } : null;
+  }
+
+  function recordPlayerMsg(username, text) {
+    const cutoff = Date.now() - PLAYER_MSG_TTL;
+    while (recentPlayerMsgs.length && recentPlayerMsgs[0].ts < cutoff) recentPlayerMsgs.shift();
+    recentPlayerMsgs.push({ username: username.toLowerCase(), text, ts: Date.now() });
+    if (recentPlayerMsgs.length > 50) recentPlayerMsgs.shift();
+  }
+
+  // Pick 3-4 distinctive keywords from a question for the trivia key.
+  function questionToKeys(q) {
+    const SW = new Set(['how','what','which','who','where','when','is','are','was','were','the','a','an','of','to','in','on','at','for','and','or','but','not','does','do','can','could','much','many','minimum','maximum','amount','required','needed','used','use','type','types','first','last','total','number','much','long','far','big','old']);
+    const words = q.toLowerCase().replace(/[?!.]/g, '').replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length >= 3 && !SW.has(w));
+    return words.slice(0, 4).join(' ');
+  }
+
+  // Append a new "keywords = answer" line to custom-trivia.txt, then reload.
+  function learnTrivia(question, rawAnswer) {
+    const answer = String(rawAnswer || '').trim();
+    if (!answer || answer.length > 80) return; // sanity: skip empty or absurdly long answers
+    const keys = questionToKeys(question);
+    if (!keys || keys.split(/\s+/).length < 2) return; // need at least 2 keywords
+    triviaEntries = null; // force reload before checking
+    if (solveTrivia(question.toLowerCase())) return; // already known — don't duplicate
+    const line = `${keys} = ${answer}`;
+    try {
+      fs.appendFileSync(CUSTOM_TRIVIA_PATH, '\n' + line + '\n');
+      triviaEntries = null; // reload on next solve call
+      ui.ok('Trivia learned', `"${question.slice(0, 55)}" → "${answer}"  [key: ${keys}]`);
+    } catch (e) { ui.warn('Trivia learn failed', e.message); }
+  }
   function loadTrivia() {
     if (triviaEntries) return triviaEntries;
     const entries = [];
@@ -1103,6 +1144,32 @@ async function main() {
     // end the round, so drop any pending op. Keyed off result WORDS (not a bare
     // "in N seconds") so an unrelated countdown isn't mistaken for a result.
     if (/\bcoins?\b|you (?:have )?(?:won|received)|\bgg\b|\bwinner\b|\bnobody\b|the word was|\bunreversed\b|\bunscrambled\b|\bunjumbled\b|answered correctly|correct answer|the answer was|ran out of time|time(?:'s| is) up|no one (?:got|answered)/i.test(low)) {
+      // Learn trivia from this round if we couldn't answer.
+      if (unseenTriviaQ) {
+        // "the answer was X" — server reveals it directly.
+        const directAns = low.match(/the answer was[:\s]+(.+)/i);
+        if (directAns) {
+          learnTrivia(unseenTriviaQ, directAns[1].replace(/\bin \d+.*$/i, '').trim());
+          unseenTriviaQ = null;
+        } else {
+          // "X answered correctly" — look up X's most recent chat message as the answer.
+          const winnerM = text.match(/([A-Za-z0-9_]{2,16})\s+(?:answered correctly|unscrambled|unreversed|unjumbled)/i);
+          if (winnerM) {
+            const winner = winnerM[1].toLowerCase();
+            const cutoff = Date.now() - PLAYER_MSG_TTL;
+            // Walk backwards to find their most recent short message (likely the answer).
+            for (let i = recentPlayerMsgs.length - 1; i >= 0; i--) {
+              const m = recentPlayerMsgs[i];
+              if (m.ts < cutoff) break;
+              if (m.username === winner && m.text.length <= 60) {
+                learnTrivia(unseenTriviaQ, m.text);
+                break;
+              }
+            }
+          }
+          unseenTriviaQ = null;
+        }
+      }
       clearPending();
       return;
     }
@@ -1150,6 +1217,11 @@ async function main() {
           clearPending();
           const ans = applyGame(kind, payload);
           if (ans) return scheduleAnswer(ans, kind);
+          // Trivia we couldn't answer — remember the question to learn from.
+          if (kind === 'trivia') {
+            unseenTriviaQ = payload;
+            ui.warn('Trivia unknown', `"${payload.slice(0, 60)}" — watching for the answer`);
+          }
         }
         // couldn't solve — fall through and treat this line normally
       }
@@ -1495,6 +1567,8 @@ async function main() {
         }, 1500);
       }
       if (gameMode) maybeAnswerGame(message); // auto-answer chat games when !games is on
+      // Record player chat for the self-learning trivia system.
+      const pc = parsePlayerChat(message); if (pc) recordPlayerMsg(pc.username, pc.text);
       // Fallback whisper trigger for custom /msg formats (native 'whisper' covers vanilla).
       if (TRADE_ENABLED) { const w = parseWhisperLine(message); if (w) maybeTradeTrigger(w.sender, w.msg, 'messagestr'); }
     });
@@ -1518,6 +1592,7 @@ async function main() {
       if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
       if (reswitchTimer) { clearTimeout(reswitchTimer); reswitchTimer = null; }
       if (mining) mining = null; // stop the mine loop; the old bot is gone
+      unseenTriviaQ = null;      // clear any pending learn-question on disconnect
       if (shuttingDown) return;  // scheduled daily shutdown — do NOT reconnect
       if (!joined) {
         if (offline) {
