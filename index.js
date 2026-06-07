@@ -441,6 +441,8 @@ async function main() {
   function parseWhisperLine(line) {
     const s = String(line || '').replace(/§./g, '').trim();
     let m;
+    // "✉⬇ MSG (RO0MII ➺ me) inv"  — server's own DM format
+    if ((m = s.match(/MSG\s*\(\s*([A-Za-z0-9_]{2,16})\s*[➺→»>-]+\s*(?:me|you)\s*\)\s*(.+)$/i))) return { sender: m[1], msg: m[2].trim() };
     if ((m = s.match(/^(?:\[[^\]]*\]\s*)*([A-Za-z0-9_]{2,16})\s+whispers?(?:\s+to\s+you)?\s*[:>-]?\s*(.+)$/i))) return { sender: m[1], msg: m[2] };
     if ((m = s.match(/^\[?([A-Za-z0-9_]{2,16})\s*[-=]+>\s*(?:me|you)\s*\]?\s*[:]?\s*(.+)$/i))) return { sender: m[1], msg: m[2] };
     if ((m = s.match(/^\[?([A-Za-z0-9_]{2,16})\s*[→»]\s*(?:me|you)\s*\]?\s*[:]?\s*(.+)$/i))) return { sender: m[1], msg: m[2] };
