@@ -34,8 +34,8 @@ const JOIN_TIMEOUT = 30000;       // ms to wait for a join before giving up and 
 const AFK_INTERVAL = 8000;        // ms between anti-AFK actions when !afk is on
 const TOOL_BREAK_BUFFER = 5;      // !oneblock won't use a tool with this many uses (or fewer) left — keeps it from breaking
 const MINE_REACH = 4.5;           // blocks: how close the bot must be to dig the target
-const GAME_DELAY_MIN = 3000;      // !games — min delay before auto-answering a chat game (ms)
-const GAME_DELAY_MAX = 4000;      // !games — max delay before auto-answering a chat game (ms)
+const GAME_DELAY_MIN = 2000;      // !games — min delay before auto-answering a chat game (ms)
+const GAME_DELAY_MAX = 3000;      // !games — max delay before auto-answering a chat game (ms)
 const FILL_MISSING_LETTERS_ONLY = false; // fill games: send ONLY the missing letters instead of the full word. Default false = always send the FULL answer (e.g. "pink bundle", not "pbnd").
 const AUTO_MISSING_LETTERS = false;      // if true, auto-switch to missing-letters-only when the server prints a "type only the missing letters" note. Default false = ignore that note, keep sending the full word.
 const WORDLIST_PATH = '/usr/share/dict/american-english-huge'; // dictionary used to solve "unscramble" games
@@ -50,8 +50,6 @@ const LOGIN_COMMAND = `/login ${LOGIN_PASSWORD}`;
 const SWITCH_COMMAND = '/server oneblock';// command that moves us to the target sub-server
 const SWITCH_AFTER_LOGIN = 4000;          // ms after logging in before switching servers
 const SWITCH_FALLBACK = 8000;             // ms after joining to switch anyway (login prompt or not)
-const TEAMCHAT_COMMAND = '/teamchat';     // sent after switching, joins team chat
-const TEAMCHAT_DELAY = 5000;              // ms after switch before sending teamchat
 // Chat lines that mean "you must authenticate" — triggers LOGIN_COMMAND.
 const LOGIN_PROMPT = /\b(login|loggin|log in|register|registro|authme|password)\b/i;
 
@@ -193,7 +191,6 @@ async function main() {
   let mining = null;     // { pos: Vec3 } while !oneblock is running, or null
   let gameMode = false;  // true while !games auto-answering is on
   let fillMissingOnly = FILL_MISSING_LETTERS_ONLY; // sticky: send only the missing letters for fill games
-  let suppressTeamchatRestore = false; // true while a game answer is intentionally toggling teamchat
 
   const notConnected = `  ${c.orange}▲${c.reset} ${c.orange}${c.bold}Not connected${c.reset} ${c.gray}— wait for "JOINED THE SERVER".${c.reset}`;
 
@@ -1049,9 +1046,6 @@ async function main() {
   }
 
   // Send an answer after a human-like random delay (once per puzzle).
-  // Guess-number answers go through team chat (no toggle needed).
-  // All other games (unscramble, fill, trivia, reverse, math) must go to global/public
-  // chat: toggle team chat off, send the answer, re-enable team chat.
   function scheduleAnswer(answer, kind) {
     if (answer === null || answer === undefined || answer === '') return;
     const out = String(answer);
@@ -1059,22 +1053,7 @@ async function main() {
     ui.info(`Game: ${kind}`, `answering "${out}" in ${(delay / 1000).toFixed(1)}s`);
     setTimeout(() => {
       if (!gameMode || !bot || !bot.player) return;
-      if (kind === 'guess') {
-        // Guess game stays in team chat.
-        try { bot.chat(out); ui.ok('Answer sent (team)', `${c.white}${out}`); } catch (_) {}
-      } else {
-        // All other games: toggle off team chat → send to global → re-enable.
-        suppressTeamchatRestore = true;
-        try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {}
-        setTimeout(() => {
-          if (!bot || !bot.player) return;
-          try { bot.chat(out); ui.ok('Answer sent (global)', `${c.white}${out}`); } catch (_) {}
-          setTimeout(() => {
-            suppressTeamchatRestore = false;
-            if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {} }
-          }, 800);
-        }, 500);
-      }
+      try { bot.chat(out); ui.ok('Answer sent', `${c.white}${out}`); } catch (_) {}
     }, delay);
   }
 
@@ -1127,17 +1106,7 @@ async function main() {
       const r = resolveFill(token, fillMissingOnly);
       if (!r || !r.send) { ui.warn('Fill unsolved', token); return; }
       const note = r.missing ? `${c.white}${r.send}${c.gray} (missing letters of ${r.full})` : `${c.white}${r.send}`;
-      // Fill answers go to global chat (toggle team chat off, send, re-enable).
-      suppressTeamchatRestore = true;
-      try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {}
-      setTimeout(() => {
-        if (!bot || !bot.player) return;
-        try { bot.chat(r.send); ui.ok('Answer sent (global)', note); } catch (_) {}
-        setTimeout(() => {
-          suppressTeamchatRestore = false;
-          if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {} }
-        }, 800);
-      }, 500);
+      try { bot.chat(r.send); ui.ok('Answer sent', note); } catch (_) {}
     }, delay);
   }
 
@@ -1508,16 +1477,6 @@ async function main() {
     let switchFallback = null; // timer that switches anyway if no login prompt arrives
     let reswitchTimer = null;  // periodic "/server oneblock" so a restart bounce gets us back
     let lobbyReswitchAt = 0;   // debounce for restart-message-triggered re-switching
-    let teamchatTimer = null;  // delayed /teamchat after switching
-
-    function scheduleTeamchat() {
-      if (teamchatTimer) clearTimeout(teamchatTimer);
-      teamchatTimer = setTimeout(() => {
-        if (bot && bot.player) {
-          try { bot.chat(TEAMCHAT_COMMAND); ui.ok('Team chat', TEAMCHAT_COMMAND); } catch (_) {}
-        }
-      }, TEAMCHAT_DELAY);
-    }
 
     // Send the server-switch command exactly once per connection, then keep a
     // periodic re-send going so a later sub-server restart (which bounces us to
@@ -1528,7 +1487,6 @@ async function main() {
       if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
       try { bot.chat(SWITCH_COMMAND); ui.ok('Server switch', SWITCH_COMMAND); } catch (_) {}
       scheduleReswitch();
-      scheduleTeamchat();
     }
 
     // Re-send SWITCH_COMMAND every 5-10 min (random). On oneblock the server
@@ -1540,7 +1498,6 @@ async function main() {
       reswitchTimer = setTimeout(() => {
         if (bot && bot.player) {
           try { bot.chat(SWITCH_COMMAND); ui.info('Re-join oneblock', `${SWITCH_COMMAND} (auto, every 5-10m)`); } catch (_) {}
-          scheduleTeamchat();
         }
         scheduleReswitch(); // queue the next cycle
       }, delay);
@@ -1592,16 +1549,9 @@ async function main() {
           lobbyReswitchAt = now;
           ui.warn('Restart / lobby detected', `re-joining oneblock in ${LOBBY_RESWITCH_DELAY / 1000}s`);
           setTimeout(() => {
-            if (bot && bot.player) { try { bot.chat(SWITCH_COMMAND); ui.ok('Re-join oneblock', SWITCH_COMMAND); } catch (_) {} scheduleTeamchat(); }
+            if (bot && bot.player) { try { bot.chat(SWITCH_COMMAND); ui.ok('Re-join oneblock', SWITCH_COMMAND); } catch (_) {} }
           }, LOBBY_RESWITCH_DELAY);
         }
-      }
-      // If the server untoggled our team chat (e.g. after a reset), re-toggle it immediately.
-      // Skip this when a game answer intentionally toggled it off (suppressTeamchatRestore).
-      if (!suppressTeamchatRestore && /team\s*chat\s*is\s*untoggled/i.test(message)) {
-        setTimeout(() => {
-          if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); ui.ok('Team chat re-toggled', 'server cleared it, sent it again'); } catch (_) {} }
-        }, 1500);
       }
       if (gameMode) maybeAnswerGame(message); // auto-answer chat games when !games is on
       // Record player chat for the self-learning trivia system.
