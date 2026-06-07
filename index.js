@@ -1153,11 +1153,12 @@ async function main() {
           unseenTriviaQ = null;
         } else {
           // "X answered correctly" — look up X's most recent chat message as the answer.
+          // Only the winner's message counts; wrong guesses from other players are ignored
+          // because we only look up the specific winner by name.
           const winnerM = text.match(/([A-Za-z0-9_]{2,16})\s+(?:answered correctly|unscrambled|unreversed|unjumbled)/i);
           if (winnerM) {
             const winner = winnerM[1].toLowerCase();
             const cutoff = Date.now() - PLAYER_MSG_TTL;
-            // Walk backwards to find their most recent short message (likely the answer).
             for (let i = recentPlayerMsgs.length - 1; i >= 0; i--) {
               const m = recentPlayerMsgs[i];
               if (m.ts < cutoff) break;
@@ -1166,8 +1167,10 @@ async function main() {
                 break;
               }
             }
+            unseenTriviaQ = null; // winner found — done with this question
           }
-          unseenTriviaQ = null;
+          // No winner (e.g. "Nobody answered in time") — keep unseenTriviaQ alive so the
+          // "The answer was: X" line that follows can still teach us the correct answer.
         }
       }
       clearPending();
