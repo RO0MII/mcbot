@@ -2,6 +2,8 @@ process.env.TZ = 'Asia/Colombo'; // run all timestamps/logs in Sri Lanka time (m
 
 const readline = require('readline');
 const fs = require('fs');
+const path = require('path');
+const { spawn } = require('child_process');
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
@@ -190,6 +192,25 @@ async function main() {
   function ipcWrite(d) { try { fs.writeFileSync(IPC_FILE, JSON.stringify(d)); } catch (_) {} }
   function ipcPushChat(line) { const d = ipcRead(); (d.mcMessages = d.mcMessages || []).push(line); if (d.mcMessages.length > 100) d.mcMessages = d.mcMessages.slice(-100); ipcWrite(d); }
   function ipcSetStatus(status) { const d = ipcRead(); d.botStatus = status; ipcWrite(d); }
+
+  // ---- Auto-start Discord bridge (reads token from .env, never in command line) ----
+  let discordChild = null;
+  function startDiscordBridge() {
+    const bridgePath = path.join(__dirname, 'discord-bridge.js');
+    if (!fs.existsSync(bridgePath)) return;
+    discordChild = spawn('node', [bridgePath], {
+      cwd: __dirname,
+      stdio: 'inherit',
+      detached: false,
+      env: { ...process.env, NODE_ENV: process.env.NODE_ENV || 'production' },
+    });
+    discordChild.on('exit', (code) => {
+      if (code !== 0) ui.warn('Discord bridge', `exited with code ${code}`);
+      discordChild = null;
+    });
+  }
+  startDiscordBridge();
+
   // Poll IPC every second for commands sent from Discord
   setInterval(() => {
     const d = ipcRead();
