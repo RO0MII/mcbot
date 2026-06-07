@@ -37,7 +37,7 @@ const MINE_REACH = 4.5;           // blocks: how close the bot must be to dig th
 const GAME_DELAY_MIN = 3000;      // !games — min delay before auto-answering a chat game (ms)
 const GAME_DELAY_MAX = 4000;      // !games — max delay before auto-answering a chat game (ms)
 const FILL_MISSING_LETTERS_ONLY = false; // fill games: send ONLY the missing letters instead of the full word. Default false = always send the FULL answer (e.g. "pink bundle", not "pbnd").
-const AUTO_MISSING_LETTERS = false;      // if true, auto-switch to missing-letters-only when the server prints a "type only the missing letters" note. Default false = ignore that note, keep sending the full word.
+const AUTO_MISSING_LETTERS = true;       // if true, auto-switch to missing-letters-only when the server prints a "type only the missing letters" note.
 const WORDLIST_PATH = '/usr/share/dict/american-english-huge'; // dictionary used to solve "unscramble" games
 const CUSTOM_WORDS_PATH = './custom-words.txt'; // extra words (one per line); checked first
 const CUSTOM_TRIVIA_PATH = './custom-trivia.txt'; // extra "question keywords = answer" lines; checked first
@@ -183,6 +183,28 @@ async function main() {
   let bot = null;
   let listenerAttached = false;
   let shuttingDown = false; // true once the scheduled daily shutdown fires — blocks reconnect
+
+  // ---- Discord IPC ----
+  const IPC_FILE = require('path').join(__dirname, '.discord-ipc.json');
+  function ipcRead() { try { return JSON.parse(fs.readFileSync(IPC_FILE, 'utf8')); } catch (_) { return { mcMessages: [], commands: [], botStatus: null }; } }
+  function ipcWrite(d) { try { fs.writeFileSync(IPC_FILE, JSON.stringify(d)); } catch (_) {} }
+  function ipcPushChat(line) { const d = ipcRead(); (d.mcMessages = d.mcMessages || []).push(line); if (d.mcMessages.length > 100) d.mcMessages = d.mcMessages.slice(-100); ipcWrite(d); }
+  function ipcSetStatus(status) { const d = ipcRead(); d.botStatus = status; ipcWrite(d); }
+  // Poll IPC every second for commands sent from Discord
+  setInterval(() => {
+    const d = ipcRead();
+    if (!d.commands || !d.commands.length) return;
+    d.commands.forEach((cmd) => {
+      if (!bot || !bot.player) return;
+      if (cmd.startsWith('__chat__:')) {
+        try { bot.chat(cmd.slice(9)); } catch (_) {}
+      } else {
+        handleCommand(cmd);
+      }
+    });
+    d.commands = [];
+    ipcWrite(d);
+  }, 1000);
 
   // ---- Local bot commands (the `!` commands) ----
   // These are handled here in the console and are NEVER sent to server chat.
@@ -1526,6 +1548,7 @@ async function main() {
       joined = true;
       clearTimeout(watchdog);
       try { bot.pathfinder.setMovements(new Movements(bot)); } catch (_) {}
+      ipcSetStatus('online');
       console.log(`\n  ${c.green}${c.bold}✅ JOINED THE SERVER${c.reset} ${c.gray}— ${c.white}${username}${c.gray} is now in ${c.white}${host}:${port}${c.gray}.${c.reset}`);
       console.log(`  ${c.gray}  Type a message to chat. Start with ${c.yellow}/${c.gray} for a server command, ${c.yellow}!${c.gray} for a bot command.${c.reset}`);
       console.log(`  ${c.gray}  Type ${c.yellow}!help${c.gray} for bot commands, ${c.yellow}quit${c.gray} or ${c.yellow}Ctrl+C${c.gray} to exit.${c.reset}\n`);
@@ -1543,6 +1566,7 @@ async function main() {
     // Show server chat
     bot.on('messagestr', (message) => {
       process.stdout.write(`\r  ${c.cyan}${c.bold}[CHAT]${c.reset} ${c.white}${message}${c.reset}\n`);
+      ipcPushChat(message); // forward to Discord bridge
       // Auto-login: the server asks us to authenticate -> send LOGIN_COMMAND.
       if (AUTO_LOGIN && !loggedIn && LOGIN_PROMPT.test(message)) doLogin();
       // Restart / "sent to lobby" -> re-join oneblock fast (debounced 30s).
@@ -1583,6 +1607,7 @@ async function main() {
       if (reswitchTimer) { clearTimeout(reswitchTimer); reswitchTimer = null; }
       if (mining) mining = null; // stop the mine loop; the old bot is gone
       unseenTriviaQ = null;      // clear any pending learn-question on disconnect
+      ipcSetStatus('offline');
       if (shuttingDown) return;  // scheduled daily shutdown — do NOT reconnect
       if (!joined) {
         if (offline) {
