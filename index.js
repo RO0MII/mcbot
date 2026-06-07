@@ -1048,9 +1048,9 @@ async function main() {
   }
 
   // Send an answer after a human-like random delay (once per puzzle).
-  // For guess-number games the answer must go to global/public chat, so team chat
-  // is toggled off first, the answer is sent, then team chat is re-enabled.
-  // All other game types (unscramble, fill, trivia, reverse, math) stay in team chat.
+  // Guess-number answers go through team chat (no toggle needed).
+  // All other games (unscramble, fill, trivia, reverse, math) must go to global/public
+  // chat: toggle team chat off, send the answer, re-enable team chat.
   function scheduleAnswer(answer, kind) {
     if (answer === null || answer === undefined || answer === '') return;
     const out = String(answer);
@@ -1059,18 +1059,18 @@ async function main() {
     setTimeout(() => {
       if (!gameMode || !bot || !bot.player) return;
       if (kind === 'guess') {
-        // Toggle team chat OFF so the answer reaches global chat.
+        // Guess game stays in team chat.
+        try { bot.chat(out); ui.ok('Answer sent (team)', `${c.white}${out}`); } catch (_) {}
+      } else {
+        // All other games: toggle off team chat → send to global → re-enable.
         try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {}
         setTimeout(() => {
           if (!bot || !bot.player) return;
           try { bot.chat(out); ui.ok('Answer sent (global)', `${c.white}${out}`); } catch (_) {}
-          // Re-enable team chat after the answer is sent.
           setTimeout(() => {
             if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {} }
           }, 800);
         }, 500);
-      } else {
-        try { bot.chat(out); ui.ok('Answer sent', `${c.white}${out}`); } catch (_) {}
       }
     }, delay);
   }
@@ -1124,7 +1124,15 @@ async function main() {
       const r = resolveFill(token, fillMissingOnly);
       if (!r || !r.send) { ui.warn('Fill unsolved', token); return; }
       const note = r.missing ? `${c.white}${r.send}${c.gray} (missing letters of ${r.full})` : `${c.white}${r.send}`;
-      try { bot.chat(r.send); ui.ok('Answer sent', note); } catch (_) {}
+      // Fill answers go to global chat (toggle team chat off, send, re-enable).
+      try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {}
+      setTimeout(() => {
+        if (!bot || !bot.player) return;
+        try { bot.chat(r.send); ui.ok('Answer sent (global)', note); } catch (_) {}
+        setTimeout(() => {
+          if (bot && bot.player) { try { bot.chat(TEAMCHAT_COMMAND); } catch (_) {} }
+        }, 800);
+      }, 500);
     }, delay);
   }
 
