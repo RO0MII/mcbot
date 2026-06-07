@@ -13,6 +13,23 @@ const VERSION = '1.20.1';         // Fixed version = skip the auto-detect ping r
 const AUTO_RECONNECT = true;      // Keep retrying while the server boots (Aternos)
 const RECONNECT_DELAY = 5000;     // ms between retries
 const DAILY_SHUTDOWN_HOUR = 4;    // hour (0-23, Asia/Colombo) to disconnect and EXIT without reconnecting; set to null to disable
+
+// ---- Auto-vault: every VAULT_INTERVAL, deposit keep-items into /pv 1 and trash the rest ----
+const AUTO_VAULT = true;                       // run the deposit+trash cycle on a timer
+const VAULT_INTERVAL = 10 * 60 * 1000;         // every 10 minutes
+const VAULT_PV_COMMAND = '/pv 1';              // command that opens the player-vault GUI to deposit into
+const VAULT_TRASH_COMMAND = '/trash';          // command that opens the trash GUI (deposited items are destroyed)
+const VAULT_KEEP = ['pink candle', 'party key']; // these go to the vault; EVERYTHING ELSE in the inventory is trashed
+
+// ---- Auto-trade: when the owner whispers a trigger word, give them the keys+candles ----
+const TRADE_ENABLED = true;                     // master switch for the whisper-triggered trade
+const TRADE_OWNER = 'RO0MII';                    // ONLY this player can trigger it; also the trade target
+const TRADE_TRIGGER = 'inv';                     // the whispered word that starts the flow
+const TRADE_PV_COMMAND = '/pv 1';                // vault to withdraw the items from first
+const TRADE_GIVE = ['party key', 'pink candle']; // withdraw these and put them into the trade
+const TRADE_CONFIRM_WOOL = ['lime wool', 'green wool']; // click one of these to confirm the trade
+const TRADE_AVOID_WOOL = ['red wool'];           // never click these (decline/cancel button)
+const TRADE_ACCEPT_TIMEOUT = 60000;              // ms to wait for the owner to accept (trade window to open)
 const JOIN_TIMEOUT = 30000;       // ms to wait for a join before giving up and retrying (fixes hangs)
 const AFK_INTERVAL = 8000;        // ms between anti-AFK actions when !afk is on
 const TOOL_BREAK_BUFFER = 5;      // !oneblock won't use a tool with this many uses (or fewer) left — keeps it from breaking
@@ -207,6 +224,226 @@ async function main() {
       try { rl.close(); } catch (_) {}
       process.exit(0);
     }, ms);
+  }
+
+  // ---- Auto-vault: deposit keep-items to /pv 1, trash everything else ----
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  let vaultMode = AUTO_VAULT; // toggled by !autovault
+  let vaultTimer = null;      // the 10-min interval handle
+  let vaultBusy = false;      // guard so two cycles never overlap
+
+  // Flatten a chat component (string | {text, extra} | array) into plain text.
+  function chatToText(j) {
+    if (j == null) return '';
+    if (typeof j === 'string') return j;
+    if (Array.isArray(j)) return j.map(chatToText).join('');
+    let s = typeof j.text === 'string' ? j.text : '';
+    if (j.extra) s += chatToText(j.extra);
+    return s;
+  }
+
+  // A clean, lowercase label for an item: its custom (server) name if it has one,
+  // otherwise its normal display name. Color codes and symbols are stripped so a
+  // fancy "✦ §ePARTY KEY §f✦" still matches "party key".
+  function itemLabel(item) {
+    if (!item) return '';
+    let name = '';
+    try {
+      const cn = item.customName;
+      if (cn) { try { name = chatToText(JSON.parse(cn)); } catch (_) { name = chatToText(cn); } }
+    } catch (_) {}
+    if (!name) name = item.displayName || item.name || '';
+    return String(name).replace(/§./g, '').replace(/[^a-z0-9 ]/gi, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+  const isKeepItem = (item) => { const l = itemLabel(item); return l && VAULT_KEEP.some((k) => l.includes(k)); };
+
+  // Run a command that opens a chest GUI and wait for the window. Returns the
+  // window, or null if none opened within the timeout.
+  function openCommandWindow(cmd, timeout = 5000) {
+    return new Promise((res) => {
+      let done = false;
+      const onOpen = (w) => { if (done) return; done = true; clearTimeout(to); res(w); };
+      const to = setTimeout(() => { if (done) return; done = true; bot.removeListener('windowOpen', onOpen); res(null); }, timeout);
+      bot.once('windowOpen', onOpen);
+      try { bot.chat(cmd); } catch (_) { if (!done) { done = true; clearTimeout(to); bot.removeListener('windowOpen', onOpen); res(null); } }
+    });
+  }
+
+  // Shift-click every player-inventory item matching `predicate` into the open
+  // container (the chest GUI). Armor/offhand aren't part of a container window,
+  // so equipped gear is never touched. Returns how many stacks were moved.
+  async function depositMatching(predicate) {
+    const win = bot.currentWindow;
+    if (!win) return 0;
+    let moved = 0;
+    for (let slot = win.inventoryStart; slot < win.inventoryEnd; slot++) {
+      const it = win.slots[slot];
+      if (it && predicate(it)) {
+        try { await bot.clickWindow(slot, 0, 1); moved++; await sleep(160); } catch (_) {}
+      }
+    }
+    return moved;
+  }
+
+  // One full cycle: keep-items -> /pv 1, then everything else -> /trash.
+  async function runVaultCycle(manual = false) {
+    if (!bot || !bot.player) { if (manual) console.log(notConnected); return; }
+    if (vaultBusy) { if (manual) ui.warn('Vault busy', 'a cycle is already running'); return; }
+    vaultBusy = true;
+    try {
+      const items = bot.inventory.items();
+      const hasKeep = items.some(isKeepItem);
+      const hasJunk = items.some((it) => !isKeepItem(it));
+      if (!hasKeep && !hasJunk) { if (manual) ui.info('Vault', 'inventory empty — nothing to do'); return; }
+
+      // 1) Deposit the keep-items into the player vault.
+      if (hasKeep) {
+        const w = await openCommandWindow(VAULT_PV_COMMAND);
+        if (w) {
+          await sleep(350);
+          const n = await depositMatching(isKeepItem);
+          await sleep(200);
+          try { bot.closeWindow(w); } catch (_) {}
+          ui.ok('Vault deposit', `${n} stack(s) → ${VAULT_PV_COMMAND}`);
+        } else { ui.warn('Vault', `no GUI opened for ${VAULT_PV_COMMAND}`); }
+        await sleep(500);
+      }
+
+      // 2) Trash everything that isn't a keep-item (PERMANENT). isKeepItem guards
+      //    this too, so a failed deposit above never sends keep-items to the trash.
+      if (bot.inventory.items().some((it) => !isKeepItem(it))) {
+        const w = await openCommandWindow(VAULT_TRASH_COMMAND);
+        if (w) {
+          await sleep(350);
+          const n = await depositMatching((it) => !isKeepItem(it));
+          await sleep(200);
+          try { bot.closeWindow(w); } catch (_) {}
+          ui.warn('Trashed', `${n} stack(s) via ${VAULT_TRASH_COMMAND}`);
+        } else { ui.warn('Vault', `no GUI opened for ${VAULT_TRASH_COMMAND}`); }
+      }
+    } catch (e) {
+      ui.err('Vault cycle failed', e.message || String(e));
+    } finally {
+      vaultBusy = false;
+    }
+  }
+
+  function startVaultTimer() {
+    if (vaultTimer) return;
+    vaultTimer = setInterval(() => { if (vaultMode && bot && bot.player) runVaultCycle(); }, VAULT_INTERVAL);
+  }
+  function stopVaultTimer() { if (vaultTimer) { clearInterval(vaultTimer); vaultTimer = null; } }
+
+  // ---- Auto-trade: owner whispers "inv" -> withdraw keys+candles from /pv 1, /trade them ----
+  let tradeBusy = false;
+  const isGiveItem = (item) => { const l = itemLabel(item); return l && TRADE_GIVE.some((g) => l.includes(g)); };
+
+  // Shift-click container-side items matching `predicate` INTO the player inventory (withdraw).
+  async function withdrawMatching(predicate) {
+    const win = bot.currentWindow;
+    if (!win) return 0;
+    let moved = 0;
+    for (let slot = 0; slot < win.inventoryStart; slot++) {
+      const it = win.slots[slot];
+      if (it && predicate(it)) {
+        try { await bot.clickWindow(slot, 0, 1); moved++; await sleep(160); } catch (_) {}
+      }
+    }
+    return moved;
+  }
+
+  // Left-click the first container item whose label matches one of `names` and none of `avoid`.
+  async function clickFirstMatch(names, avoid) {
+    const win = bot.currentWindow;
+    if (!win) return null;
+    for (let slot = 0; slot < win.inventoryStart; slot++) {
+      const it = win.slots[slot];
+      if (!it) continue;
+      const l = itemLabel(it);
+      if (avoid.some((a) => l.includes(a))) continue;
+      if (names.some((n) => l.includes(n))) {
+        try { await bot.clickWindow(slot, 0, 0); return { slot, label: l }; } catch (_) { return null; }
+      }
+    }
+    return null;
+  }
+
+  // Log the non-empty CONTAINER slots of a window (for tuning the trade GUI layout).
+  function logWindowContainer(win, where) {
+    const parts = [];
+    for (let slot = 0; slot < win.inventoryStart && parts.length < 28; slot++) {
+      const it = win.slots[slot];
+      if (it) parts.push(`${slot}:${itemLabel(it)}`);
+    }
+    ui.info(`Trade GUI (${where})`, parts.length ? parts.join('  ') : '(no container items)');
+  }
+
+  // The full trade flow. Triggered by the owner's whisper, or manually via !invtrade.
+  async function runTradeFlow(trigger = 'manual') {
+    if (!TRADE_ENABLED) { if (trigger === 'manual') ui.warn('Trade', 'disabled (TRADE_ENABLED=false)'); return; }
+    if (!bot || !bot.player) { if (trigger === 'manual') console.log(notConnected); return; }
+    if (tradeBusy) { ui.warn('Trade', 'already in progress'); return; }
+    tradeBusy = true;
+    try {
+      ui.info('Trade flow', `triggered by ${trigger} — withdrawing keys+candles from ${TRADE_PV_COMMAND}`);
+      // 1) Withdraw the give-items from the vault into the inventory.
+      const pv = await openCommandWindow(TRADE_PV_COMMAND);
+      if (pv) {
+        await sleep(350);
+        const n = await withdrawMatching(isGiveItem);
+        await sleep(200);
+        try { bot.closeWindow(pv); } catch (_) {}
+        ui.ok('Withdrew', `${n} stack(s) from ${TRADE_PV_COMMAND}`);
+      } else { ui.warn('Trade', `no GUI opened for ${TRADE_PV_COMMAND} — using whatever is already in inventory`); }
+      await sleep(600);
+
+      const have = bot.inventory.items().filter(isGiveItem);
+      if (!have.length) { ui.warn('Trade aborted', 'no keys/candles to trade'); return; }
+
+      // 2) Send the trade request and wait for the owner to accept (window opens).
+      const tradeCmd = `/trade ${TRADE_OWNER}`;
+      ui.info('Trade', `sending ${tradeCmd} — waiting up to ${TRADE_ACCEPT_TIMEOUT / 1000}s for accept`);
+      const win = await openCommandWindow(tradeCmd, TRADE_ACCEPT_TIMEOUT);
+      if (!win) { ui.warn('Trade aborted', `${TRADE_OWNER} did not accept in time`); return; }
+      await sleep(600);
+      logWindowContainer(win, 'opened');
+
+      // 3) Deposit the keys+candles into the trade window.
+      const dn = await depositMatching(isGiveItem);
+      ui.ok('Trade deposit', `${dn} stack(s) into the trade window`);
+      await sleep(600);
+      logWindowContainer(win, 'after deposit');
+
+      // 4) Confirm: click the green/lime wool, never the red one. If no green wool
+      //    is found we leave the window for manual confirm rather than risk decline.
+      const clicked = await clickFirstMatch(TRADE_CONFIRM_WOOL, TRADE_AVOID_WOOL);
+      if (clicked) ui.ok('Trade confirm', `clicked ${clicked.label} (slot ${clicked.slot}) — completes when ${TRADE_OWNER} confirms`);
+      else ui.warn('Trade confirm', 'no green/lime wool found — confirm manually (see GUI log above)');
+    } catch (e) {
+      ui.err('Trade flow failed', e.message || String(e));
+    } finally {
+      tradeBusy = false;
+    }
+  }
+
+  // Whisper trigger: only the owner, only the exact trigger word.
+  function maybeTradeTrigger(sender, message, via) {
+    if (!TRADE_ENABLED) return;
+    if (!sender || String(sender).toLowerCase() !== TRADE_OWNER.toLowerCase()) return;
+    if (String(message || '').trim().toLowerCase() !== TRADE_TRIGGER) return;
+    ui.info('Trade trigger', `${sender} whispered "${TRADE_TRIGGER}" (${via})`);
+    runTradeFlow(`whisper:${sender}`);
+  }
+
+  // Fallback whisper parser for custom server formats not caught by bot.on('whisper').
+  function parseWhisperLine(line) {
+    const s = String(line || '').replace(/§./g, '').trim();
+    let m;
+    if ((m = s.match(/^(?:\[[^\]]*\]\s*)*([A-Za-z0-9_]{2,16})\s+whispers?(?:\s+to\s+you)?\s*[:>-]?\s*(.+)$/i))) return { sender: m[1], msg: m[2] };
+    if ((m = s.match(/^\[?([A-Za-z0-9_]{2,16})\s*[-=]+>\s*(?:me|you)\s*\]?\s*[:]?\s*(.+)$/i))) return { sender: m[1], msg: m[2] };
+    if ((m = s.match(/^\[?([A-Za-z0-9_]{2,16})\s*[→»]\s*(?:me|you)\s*\]?\s*[:]?\s*(.+)$/i))) return { sender: m[1], msg: m[2] };
+    if ((m = s.match(/^from\s+([A-Za-z0-9_]{2,16})\s*[:]\s*(.+)$/i))) return { sender: m[1], msg: m[2] };
+    return null;
   }
 
   // Anti-AFK: small harmless movements so the server never marks us idle.
@@ -909,6 +1146,9 @@ async function main() {
           ['!health', 'Show health & hunger'],
           ['!players', 'List online players'],
           ['!sco', 'Show the server sidebar scoreboard'],
+          ['!vault', 'Deposit keep-items to /pv 1, trash the rest now'],
+          ['!autovault on|off', 'Toggle the 10-min auto-vault cycle'],
+          ['!invtrade', `Run the ${TRADE_OWNER} trade flow now (test)`],
           ['!follow <name>', 'Follow a player'],
           ['!oneblock x y z', 'Mine a block on loop (tool-safe)'],
           ['!oneblock stop', 'Stop one-block mining'],
@@ -999,6 +1239,36 @@ async function main() {
         }
         console.log(`  ${c.blue}╰${bar}╯${c.reset}`);
         console.log('');
+        break;
+      }
+
+      case 'vault':
+      case 'pv': {
+        if (!connected) { console.log(notConnected); break; }
+        ui.info('Vault', 'running deposit + trash cycle now...');
+        runVaultCycle(true);
+        break;
+      }
+
+      case 'invtrade':
+      case 'trade': {
+        if (!connected) { console.log(notConnected); break; }
+        ui.info('Trade', `running the ${TRADE_OWNER} trade flow now...`);
+        runTradeFlow('manual');
+        break;
+      }
+
+      case 'autovault': {
+        const mode = arg.toLowerCase();
+        if (mode === 'on') {
+          vaultMode = true; startVaultTimer();
+          ui.ok('Auto-vault ON', `every ${VAULT_INTERVAL / 60000}m: keep [${VAULT_KEEP.join(', ')}] → ${VAULT_PV_COMMAND}, trash the rest`);
+        } else if (mode === 'off') {
+          vaultMode = false; stopVaultTimer();
+          ui.warn('Auto-vault OFF', 'no longer auto-depositing/trashing');
+        } else {
+          ui.err('Usage', 'type  !autovault on  or  !autovault off');
+        }
         break;
       }
 
@@ -1163,7 +1433,12 @@ async function main() {
         }
       }
       if (gameMode) maybeAnswerGame(message); // auto-answer chat games when !games is on
+      // Fallback whisper trigger for custom /msg formats (native 'whisper' covers vanilla).
+      if (TRADE_ENABLED) { const w = parseWhisperLine(message); if (w) maybeTradeTrigger(w.sender, w.msg, 'messagestr'); }
     });
+
+    // Native whisper event (vanilla "X whispers: .." and "[X -> me] .." formats).
+    bot.on('whisper', (username, message) => maybeTradeTrigger(username, message, 'whisper-event'));
 
     bot.on('kicked', (reason) => console.log(`  ${c.orange}●${c.reset} ${c.orange}${c.bold}Kicked:${c.reset} ${c.white}${reason}${c.reset}`));
 
@@ -1230,6 +1505,10 @@ async function main() {
   }
 
   scheduleDailyShutdown();
+  if (AUTO_VAULT) {
+    startVaultTimer();
+    ui.info('Auto-vault armed', `every ${VAULT_INTERVAL / 60000}m: keep [${VAULT_KEEP.join(', ')}] → ${VAULT_PV_COMMAND}, trash the rest`);
+  }
   connect();
 }
 
