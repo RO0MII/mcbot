@@ -38,6 +38,12 @@ function writeIPC(data) {
 function clearMcMessages() {
   const d = readIPC(); d.mcMessages = []; writeIPC(d);
 }
+function popDiscordReplies() {
+  const d = readIPC();
+  const replies = d.discordReplies || [];
+  if (replies.length) { d.discordReplies = []; writeIPC(d); }
+  return replies;
+}
 function pushDiscordCommand(cmd) {
   const d = readIPC();
   if (!d.commands) d.commands = [];
@@ -150,6 +156,14 @@ function startPolling() {
 
   // Flush remaining buffered lines every 2s so chat isn't held too long.
   setInterval(flushToDiscord, 2000);
+
+  // Send bot command replies back to Discord (from !help, !games, etc.)
+  setInterval(async () => {
+    if (!channel) return;
+    for (const reply of popDiscordReplies()) {
+      await channel.send({ content: reply.slice(0, 1900) }).catch(() => {});
+    }
+  }, 500);
 }
 
 // ---- Ready ----

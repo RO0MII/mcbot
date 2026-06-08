@@ -261,6 +261,26 @@ async function main() {
   }
   startDiscordBridge();
 
+  // Push a reply string to IPC so discord-bridge.js can send it to the Discord channel.
+  function ipcPushDiscordReply(text) {
+    const d = ipcRead();
+    d.discordReplies = d.discordReplies || [];
+    d.discordReplies.push(text);
+    ipcWrite(d);
+  }
+
+  // Temporarily capture console.log output (ANSI codes stripped) into a buffer.
+  // Returns a stop() function that ends capture and returns the collected text.
+  const origConsoleLog = console.log;
+  function startCapture() {
+    const buf = [];
+    console.log = (...args) => {
+      origConsoleLog(...args); // still print to terminal
+      buf.push(args.map(String).join(' ').replace(/\x1b\[[^m]*m/g, '').replace(/\r/g, ''));
+    };
+    return () => { console.log = origConsoleLog; return buf.join('\n').trim(); };
+  }
+
   // Poll IPC every second for commands sent from Discord
   setInterval(() => {
     const d = ipcRead();
@@ -270,7 +290,11 @@ async function main() {
       if (cmd.startsWith('__chat__:')) {
         try { bot.chat(cmd.slice(9)); } catch (_) {}
       } else {
+        ui.info('Discord cmd', cmd);
+        const stop = startCapture();
         handleCommand(cmd);
+        const out = stop();
+        if (out) ipcPushDiscordReply(`\`\`\`\n${out}\n\`\`\``);
       }
     });
     d.commands = [];
