@@ -10,6 +10,7 @@
     "start:all": "node index.js & node discord-bridge.js"
   },
   "dependencies": {
+    "discord.js": "^14.26.4",
     "dotenv": "^17.4.2",
     "mineflayer": "^4.20.1",
     "mineflayer-pathfinder": "^2.4.5"
