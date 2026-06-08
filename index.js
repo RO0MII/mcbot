@@ -172,34 +172,6 @@ function saveEnvKey(key, value) {
 async function main() {
   printBanner();
 
-  // 0) Discord token — ask once, save to .env, never ask again.
-  if (!process.env.DISCORD_TOKEN) {
-    let token = '';
-    while (!token.trim()) {
-      // Use a raw readline query so the token is not echoed to the terminal.
-      token = await new Promise((res) => {
-        process.stdout.write(`  ${c.green}➜${c.reset} ${c.white}${c.bold}Enter Discord bot token${c.reset}${c.gray} (saved to .env, won't ask again):${c.reset} ${c.yellow}`);
-        process.stdin.setRawMode(true);
-        process.stdin.resume();
-        process.stdin.setEncoding('utf8');
-        let buf = '';
-        process.stdin.on('data', function handler(ch) {
-          if (ch === '\r' || ch === '\n') {
-            process.stdin.setRawMode(false);
-            process.stdin.removeListener('data', handler);
-            process.stdout.write(c.reset + '\n');
-            res(buf);
-          } else if (ch === '') { process.exit(); }
-          else if (ch === '') { if (buf.length) buf = buf.slice(0, -1); }
-          else { buf += ch; }
-        });
-      });
-      if (!token.trim()) console.log(`  ${c.red}✘ Token cannot be empty.${c.reset}`);
-    }
-    saveEnvKey('DISCORD_TOKEN', token.trim());
-    process.env.DISCORD_TOKEN = token.trim();
-    console.log(`  ${c.green}✔${c.reset} ${c.gray}Discord token saved — won't ask again.${c.reset}`);
-  }
 
   // 1) Player name
   let username = '';
@@ -222,6 +194,37 @@ async function main() {
     const parts = ipInput.split(':');
     host = parts[0].trim() || DEFAULT_IP;
     if (parts[1] && !isNaN(parseInt(parts[1], 10))) port = parseInt(parts[1], 10);
+  }
+
+
+
+
+  // 3) Discord token — ask once after IP, hidden input, saved to .env.
+  if (!process.env.DISCORD_TOKEN) {
+    let token = '';
+    while (!token.trim()) {
+      token = await new Promise((res) => {
+        process.stdout.write(`  ${c.green}➜${c.reset} ${c.white}${c.bold}Enter Discord bot token${c.reset}${c.gray} (saved to .env, won't ask again):${c.reset} ${c.yellow}`);
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+        process.stdin.setEncoding('utf8');
+        let buf = '';
+        process.stdin.on('data', function handler(ch) {
+          if (ch === '\r' || ch === '\n') {
+            process.stdin.setRawMode(false);
+            process.stdin.removeListener('data', handler);
+            process.stdout.write(c.reset + '\n');
+            res(buf);
+          } else if (ch === '') { process.exit(); }
+          else if (ch === '') { if (buf.length) buf = buf.slice(0, -1); }
+          else { buf += ch; }
+        });
+      });
+      if (!token.trim()) console.log(`  ${c.red}✘ Token cannot be empty.${c.reset}`);
+    }
+    saveEnvKey('DISCORD_TOKEN', token.trim());
+    process.env.DISCORD_TOKEN = token.trim();
+    console.log(`  ${c.green}✔${c.reset} ${c.gray}Discord token saved — won't ask again.${c.reset}`);
   }
 
   // 3) Connect (with auto-reconnect while the server boots)
