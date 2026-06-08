@@ -1,5 +1,7 @@
 process.env.TZ = 'Asia/Colombo'; // run all timestamps/logs in Sri Lanka time (must be set before any Date use)
 
+require('dotenv').config(); // load .env before anything else
+
 const readline = require('readline');
 const fs = require('fs');
 const path = require('path');
@@ -38,8 +40,8 @@ const TOOL_BREAK_BUFFER = 5;      // !oneblock won't use a tool with this many u
 const MINE_REACH = 4.5;           // blocks: how close the bot must be to dig the target
 const GAME_DELAY_MIN = 3000;      // !games — min delay before auto-answering a chat game (ms)
 const GAME_DELAY_MAX = 4000;      // !games — max delay before auto-answering a chat game (ms)
-const FILL_MISSING_LETTERS_ONLY = false; // fill games: send ONLY the missing letters instead of the full word. Default false = always send the FULL answer (e.g. "pink bundle", not "pbnd").
-const AUTO_MISSING_LETTERS = true;       // if true, auto-switch to missing-letters-only when the server prints a "type only the missing letters" note.
+const FILL_MISSING_LETTERS_ONLY = false; // fill games: send ONLY the missing letters instead of the full word. Default false = always send the FULL answer (e.g. "Wooden Axe", not "Oodx").
+const AUTO_MISSING_LETTERS = false;      // if true, auto-switch to missing-letters mode when server prints the note. Keep false — this server wants the FULL word.
 const WORDLIST_PATH = '/usr/share/dict/american-english-huge'; // dictionary used to solve "unscramble" games
 const CUSTOM_WORDS_PATH = './custom-words.txt'; // extra words (one per line); checked first
 const CUSTOM_TRIVIA_PATH = './custom-trivia.txt'; // extra "question keywords = answer" lines; checked first
@@ -155,8 +157,49 @@ process.on('unhandledRejection', handleStray);
 // In tmux / nohup / SSH the process should keep running game answers.
 try { process.on('SIGHUP', () => {}); } catch (_) {} // ignore — keep running after SSH drops
 
+// Save a key into .env without exposing the value in logs.
+function saveEnvKey(key, value) {
+  try {
+    const envPath = require('path').join(__dirname, '.env');
+    let content = '';
+    try { content = fs.readFileSync(envPath, 'utf8'); } catch (_) {}
+    const lines = content.split('\n').filter(l => !l.startsWith(key + '=') && !l.startsWith(key + '="') && l.trim());
+    lines.push(`${key}="${value}"`);
+    fs.writeFileSync(envPath, lines.join('\n') + '\n');
+  } catch (_) {}
+}
+
 async function main() {
   printBanner();
+
+  // 0) Discord token — ask once, save to .env, never ask again.
+  if (!process.env.DISCORD_TOKEN) {
+    let token = '';
+    while (!token.trim()) {
+      // Use a raw readline query so the token is not echoed to the terminal.
+      token = await new Promise((res) => {
+        process.stdout.write(`  ${c.green}➜${c.reset} ${c.white}${c.bold}Enter Discord bot token${c.reset}${c.gray} (saved to .env, won't ask again):${c.reset} ${c.yellow}`);
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+        process.stdin.setEncoding('utf8');
+        let buf = '';
+        process.stdin.on('data', function handler(ch) {
+          if (ch === '\r' || ch === '\n') {
+            process.stdin.setRawMode(false);
+            process.stdin.removeListener('data', handler);
+            process.stdout.write(c.reset + '\n');
+            res(buf);
+          } else if (ch === '') { process.exit(); }
+          else if (ch === '') { if (buf.length) buf = buf.slice(0, -1); }
+          else { buf += ch; }
+        });
+      });
+      if (!token.trim()) console.log(`  ${c.red}✘ Token cannot be empty.${c.reset}`);
+    }
+    saveEnvKey('DISCORD_TOKEN', token.trim());
+    process.env.DISCORD_TOKEN = token.trim();
+    console.log(`  ${c.green}✔${c.reset} ${c.gray}Discord token saved — won't ask again.${c.reset}`);
+  }
 
   // 1) Player name
   let username = '';
@@ -683,10 +726,8 @@ async function main() {
     loadPhrases();
     if (!phraseList.length) return null;
     if (!/[_.*-]/.test(token)) return null; // no blank — nothing to fill
-    // Only match multi-word tokens — single-word fill puzzles should use the
-    // dictionary, not the phrase list (avoids "tuff" hijacking "_f").
-    if (!/\s/.test(token.trim())) return null;
-    const gap = opts.exactOne ? '[a-z]' : '[a-z]{1,3}';
+    // Non-greedy so adjacent gaps don't eat into each other (e.g. __bb_e_tone -> cobblestone).
+    const gap = opts.exactOne ? '[a-z]' : '[a-z]{1,3}?';
     const words = token.toLowerCase().split(/\s+/).filter(Boolean);
     const parts = words.map((w) => {
       const masked = w.replace(/[^a-z_.*-]/g, '');
@@ -719,7 +760,8 @@ async function main() {
     // `_` = variable-length gap (1-3 chars); `.`, `*`, `-` = single letter each.
     // With opts.exactOne every `_` is exactly ONE letter — used when we must line
     // the solved word up against the mask to read off just the missing letters.
-    const gap = opts.exactOne ? '[a-z]' : '[a-z]{1,3}';
+    // Non-greedy {1,3}? prevents adjacent gaps from eating each other's letters.
+    const gap = opts.exactOne ? '[a-z]' : '[a-z]{1,3}?';
     // Order: replace .*- first (keeps `_`), then _ (so _ isn't caught in .*-)
     let reStr = masked.replace(/[.*-]/g, '[a-z]').replace(/_/g, gap);
     const re = new RegExp('^' + reStr + '$');
@@ -727,8 +769,14 @@ async function main() {
     const gapCount = (masked.match(/_/g) || []).length;
     const minLen = fixedCount + gapCount; // each gap contributes at least 1 letter
     const hits = wordList.filter((w) => w.length >= minLen && re.test(w));
-    // Prefer the shortest match — that's almost always the real answer
-    return hits.length ? hits.sort((a, b) => a.length - b.length)[0] : null;
+    if (hits.length) return hits.sort((a, b) => a.length - b.length)[0];
+    // Fallback: search individual words extracted from MC item names (e.g. "donkey" from
+    // "donkey spawn egg") — catches mob names and other game words not in the English dict.
+    if (mcWordSet) {
+      const mcHits = [...mcWordSet].filter((w) => w.length >= minLen && re.test(w));
+      if (mcHits.length) return mcHits.sort((a, b) => a.length - b.length)[0];
+    }
+    return null;
   }
 
   // Filler words an instruction line dangles after "type" ("type the missing
@@ -1091,9 +1139,11 @@ async function main() {
   // Send an answer after a human-like random delay (once per puzzle).
   // The server wants Title Case — capitalize the first letter of each word.
   function toTitleCase(s) { return s.replace(/\b[a-z]/g, (c) => c.toUpperCase()); }
+  // Only word-based answers need Title Case. Type/reverse/math/guess must be sent EXACTLY as-is.
+  const TITLE_CASE_KINDS = new Set(['unscramble', 'fill', 'fill-blank', 'trivia']);
   function scheduleAnswer(answer, kind) {
     if (answer === null || answer === undefined || answer === '') return;
-    const out = toTitleCase(String(answer));
+    const out = TITLE_CASE_KINDS.has(kind) ? toTitleCase(String(answer)) : String(answer);
     const delay = GAME_DELAY_MIN + Math.floor(Math.random() * (GAME_DELAY_MAX - GAME_DELAY_MIN + 1));
     ui.info(`Game: ${kind}`, `answering "${out}" in ${(delay / 1000).toFixed(1)}s`);
     setTimeout(() => {
