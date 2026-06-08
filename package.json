@@ -5,7 +5,9 @@
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "discord": "node discord-bridge.js",
+    "start:all": "node index.js & node discord-bridge.js"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
