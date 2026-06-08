@@ -64,25 +64,92 @@ async function ensureChannel(guild) {
 }
 
 // ---- Format a MC line for Discord ----
+// Returns a formatted string, or null to skip the line entirely.
 function formatMC(line) {
-  // Strip Minecraft §-color codes
-  return line.replace(/§[0-9a-fk-or]/gi, '').trim();
+  const s = line.replace(/§[0-9a-fk-or]/gi, '').trim();
+  if (!s) return null;
+
+  // Skip noisy server broadcast banners (vote ads, entity cleaner, play-with-friends, etc.)
+  if (/^(↓|↑|VOTE TODAY|Voting for us|vote\.|PLAY WITH FRIENDS|JOIN US|ARE YOU STUCK|GET HELP|\/help)/.test(s)) return null;
+  if (/Entities will be cleared|ENTITY CLEANER|CLEANER ▶/i.test(s)) return null;
+  if (/^(TP REQUEST|TRADE REQUEST|TELEPORT REQUEST)/i.test(s)) return null;
+
+  // ── CHATGAMES ──
+  if (s === 'CHATGAMES') return '# 🎮  CHATGAMES';
+
+  // Game instruction ("The first to fill/unscramble/answer/type... wins!")
+  if (/first (?:to|person)/i.test(s)) return `### 📋  ${s}`;
+
+  // Puzzle payload line starting with ▶
+  if (/^▶\s+/.test(s)) return `> \`${s.replace(/^▶\s+/, '').trim()}\``;
+
+  // Game answer hints / parenthetical clues
+  if (/^\(.*\)$/.test(s)) return `> *${s}*`;
+
+  // Game results
+  if (/the (?:word|answer) was\b/i.test(s)) return `## ✅  ${s}`;
+  if (/nobody (?:filled|answered|unscrambled|unjumbled|unreversed|got it)/i.test(s)) return `## ❌  ${s}`;
+  if (/\b(?:answered correctly|unscrambled|unjumbled|unreversed)\b/i.test(s)) return `## 🏆  ${s}`;
+  if (/\bcoins?\b.*(?:won|reward|receive)/i.test(s)) return `🪙  ${s}`;
+
+  // Welcome / join announcements
+  if (/Welcome.*to ONEBLOCK/i.test(s)) return `👋  ${s}`;
+
+  // Player chat:  "  [RANK] username ▶ message"
+  const pm = s.match(/^(?:\[[^\]]+\]\s*)*([A-Za-z0-9_]{2,16})\s*▶\s*(.+)$/);
+  if (pm) return `**${pm[1]}** ▶ ${pm[2]}`;
+
+  // Everything else — plain text
+  return s;
+}
+
+// Returns true if the line is a game-related event that should be flushed immediately.
+function isGameLine(raw) {
+  const s = raw.replace(/§[0-9a-fk-or]/gi, '').trim();
+  return s === 'CHATGAMES'
+    || /first (?:to|person)/i.test(s)
+    || /^▶\s+/.test(s)
+    || /the (?:word|answer) was\b/i.test(s)
+    || /nobody (?:filled|answered|unscrambled)/i.test(s)
+    || /\b(?:answered correctly|unscrambled|unjumbled|unreversed)\b/i.test(s);
 }
 
 // ---- Poll IPC and forward MC messages to Discord ----
+let pendingLines = []; // lines waiting to be batched into one message
+
+async function flushToDiscord() {
+  if (!channel || !pendingLines.length) return;
+  const text = pendingLines.join('\n').slice(0, 1900);
+  pendingLines = [];
+  await channel.send({ content: text }).catch(() => {});
+}
+
 function startPolling() {
-  setInterval(() => {
+  setInterval(async () => {
     if (!channel) return;
     const d = readIPC();
     const msgs = d.mcMessages || [];
     if (!msgs.length) return;
-    // Batch into one Discord message (max 1900 chars)
-    const lines = msgs.map(formatMC).filter(Boolean);
-    if (!lines.length) { clearMcMessages(); return; }
-    const text = lines.join('\n').slice(0, 1900);
-    channel.send({ content: text }).catch(() => {});
     clearMcMessages();
+
+    for (const raw of msgs) {
+      const formatted = formatMC(raw);
+      if (!formatted) continue; // skip noisy line
+
+      if (isGameLine(raw)) {
+        // Flush any buffered chat first, then send game line alone so it stands out.
+        await flushToDiscord();
+        await channel.send({ content: formatted }).catch(() => {});
+      } else {
+        pendingLines.push(formatted);
+        // Flush if batch is getting large.
+        if (pendingLines.join('\n').length > 1400) await flushToDiscord();
+      }
+    }
   }, POLL_INTERVAL);
+
+  // Flush remaining buffered lines every 2s so chat isn't held too long.
+  setInterval(flushToDiscord, 2000);
 }
 
 // ---- Ready ----
