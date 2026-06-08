@@ -252,8 +252,11 @@ async function main() {
       env: { ...process.env, NODE_ENV: process.env.NODE_ENV || 'production' },
     });
     discordChild.on('exit', (code) => {
-      if (code !== 0) ui.warn('Discord bridge', `exited with code ${code}`);
       discordChild = null;
+      if (code !== 0) {
+        ui.warn('Discord bridge', `exited (code ${code}) — retrying in 15s`);
+        setTimeout(startDiscordBridge, 15000);
+      }
     });
   }
   startDiscordBridge();
@@ -1693,7 +1696,16 @@ async function main() {
     // Native whisper event (vanilla "X whispers: .." and "[X -> me] .." formats).
     bot.on('whisper', (username, message) => maybeTradeTrigger(username, message, 'whisper-event'));
 
-    bot.on('kicked', (reason) => console.log(`  ${c.orange}●${c.reset} ${c.orange}${c.bold}Kicked:${c.reset} ${c.white}${reason}${c.reset}`));
+    bot.on('kicked', (reason) => {
+      const r = String(reason || '');
+      if (/guard|bot verification|failed.*verif/i.test(r)) {
+        ui.warn('GUARD kick', 'waiting 30s before retry (GUARD cooldown)');
+        // Override the normal 5s reconnect — tell 'end' handler to use a longer delay.
+        bot._guardKicked = true;
+      } else {
+        console.log(`  ${c.orange}●${c.reset} ${c.orange}${c.bold}Kicked:${c.reset} ${c.white}${r}${c.reset}`);
+      }
+    });
 
     // Connection-level problems just mean the server is offline / unreachable.
     bot.on('error', (err) => {
@@ -1724,8 +1736,10 @@ async function main() {
         console.log(`  ${c.red}●${c.reset} ${c.red}${c.bold}Disconnected.${c.reset}`);
       }
       if (AUTO_RECONNECT) {
-        console.log(`  ${c.gray}  Retrying in ${c.yellow}${RECONNECT_DELAY / 1000}s${c.gray}... (${c.yellow}Ctrl+C${c.gray} to stop)${c.reset}`);
-        setTimeout(connect, RECONNECT_DELAY);
+        const guardKicked = bot && bot._guardKicked;
+        const delay = guardKicked ? 30000 : RECONNECT_DELAY;
+        console.log(`  ${c.gray}  Retrying in ${c.yellow}${delay / 1000}s${c.gray}... (${c.yellow}Ctrl+C${c.gray} to stop)${c.reset}`);
+        setTimeout(connect, delay);
       } else {
         rl.close();
         process.exit(0);

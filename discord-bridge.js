@@ -1,6 +1,6 @@
 // Discord <-> Minecraft bot bridge
 // Forwards MC public chat to Discord, relays Discord commands/messages back to MC.
-require('dotenv').config();
+require('dotenv').config({ override: true }); // override: re-read .env even if var already set in parent env
 
 const { Client, GatewayIntentBits, PermissionFlagsBits, ChannelType } = require('discord.js');
 const fs   = require('fs');
@@ -127,4 +127,7 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-client.login(DISCORD_TOKEN);
+client.login(DISCORD_TOKEN).catch((err) => {
+  console.error(`  ✘ Discord login failed: ${err.message || err}`);
+  process.exit(1);
+});
