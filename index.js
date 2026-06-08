@@ -1254,7 +1254,11 @@ async function main() {
           // Only the winner's message counts; wrong guesses from other players are ignored
           // because we only look up the specific winner by name.
           const winnerM = text.match(/([A-Za-z0-9_]{2,16})\s+(?:answered correctly|unscrambled|unreversed|unjumbled)/i);
-          if (winnerM) {
+          // "Nobody answered correctly in time!" falsely matches the pattern above with
+          // winner="nobody". Guard against these common English words so we don't clear
+          // unseenTriviaQ before the "The answer was: X" line arrives.
+          const NOT_A_PLAYER = new Set(['nobody', 'no', 'someone', 'everyone', 'anyone']);
+          if (winnerM && !NOT_A_PLAYER.has(winnerM[1].toLowerCase())) {
             const winner = winnerM[1].toLowerCase();
             const cutoff = Date.now() - PLAYER_MSG_TTL;
             for (let i = recentPlayerMsgs.length - 1; i >= 0; i--) {
@@ -1262,12 +1266,14 @@ async function main() {
               if (m.ts < cutoff) break;
               if (m.username === winner && m.text.length <= 60) {
                 learnTrivia(unseenTriviaQ, m.text);
+                unseenTriviaQ = null; // learned from winner — done
                 break;
               }
             }
-            unseenTriviaQ = null; // winner found — done with this question
+            // If we didn't find the winner's message, keep unseenTriviaQ alive so the
+            // "The answer was: X" line that often follows can still teach the answer.
           }
-          // No winner (e.g. "Nobody answered in time") — keep unseenTriviaQ alive so the
+          // No real winner (e.g. "Nobody answered in time") — keep unseenTriviaQ alive so the
           // "The answer was: X" line that follows can still teach us the correct answer.
         }
       }
