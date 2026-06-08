@@ -275,7 +275,7 @@ async function main() {
   let afkTimer = null;   // setInterval handle while anti-AFK is on
   let following = null;  // username we're currently following, or null
   let mining = null;     // { pos: Vec3 } while !oneblock is running, or null
-  let gameMode = false;  // true while !games auto-answering is on
+  let gameMode = true;   // auto-answering is ON by default (24/7)
   let fillMissingOnly = FILL_MISSING_LETTERS_ONLY; // sticky: send only the missing letters for fill games
 
   const notConnected = `  ${c.orange}▲${c.reset} ${c.orange}${c.bold}Not connected${c.reset} ${c.gray}— wait for "JOINED THE SERVER".${c.reset}`;
@@ -1734,6 +1734,9 @@ async function main() {
   }
 
   scheduleDailyShutdown();
+  loadAnagrams(); // warm dictionaries at startup so first game answer is instant
+  loadTrivia();
+  ui.ok('Auto-games ON', `answering chat games in ${GAME_DELAY_MIN / 1000}-${GAME_DELAY_MAX / 1000}s (24/7)`);
   if (AUTO_VAULT) {
     startVaultTimer();
     ui.info('Auto-vault armed', `every ${VAULT_INTERVAL / 60000}m: keep [${VAULT_KEEP.join(', ')}] → ${VAULT_PV_COMMAND}, trash the rest`);
