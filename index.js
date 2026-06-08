@@ -959,9 +959,9 @@ async function main() {
     const low = text.toLowerCase();
 
     // Skip server status / system lines that only LOOK like games — e.g. a
-    // mining "Progress: 0% (18/10172)" bar, rate-limit notices, etc. Without
-    // this the "(18/10172)" gets mistaken for a division game (= 0.002).
-    if (/progress|please wait|please avoid|spam|cooldown|^\s*\d+\s*%|\(\s*\d+\s*\/\s*\d+\s*\)/i.test(low)) {
+    // mining "Progress: 0% (18/10172)" bar, rate-limit notices, player ads (/pwarp),
+    // item announcements like "[51x Bone Meal]", etc.
+    if (/progress|please wait|please avoid|spam|cooldown|^\s*\d+\s*%|\(\s*\d+\s*\/\s*\d+\s*\)|\/pwarp|pwarp|\[\d+x\s/i.test(low)) {
       return null;
     }
 
@@ -1237,7 +1237,7 @@ async function main() {
     // gap between the instruction and the puzzle line, so ignore the line but keep
     // any pending game ALIVE. (This is what used to eat the unscramble round:
     // "Entities will be cleared in 60 seconds!" matched "in N seconds" and wiped it.)
-    if (/progress|please wait|please avoid|spam|cooldown|prohibited|cancell?ed|will be cleared|entities will|tpa? request|teleport request|be careful/i.test(low)) {
+    if (/progress|please wait|please avoid|spam|cooldown|prohibited|cancell?ed|will be cleared|entities will|tpa? request|teleport request|be careful|\/pwarp|pwarp|\[\d+x\s/i.test(low)) {
       return;
     }
 
@@ -1627,17 +1627,20 @@ async function main() {
     }, JOIN_TIMEOUT);
 
     bot.on('spawn', () => {
+      const firstSpawn = !joined;
       joined = true;
       clearTimeout(watchdog);
       try { bot.pathfinder.setMovements(new Movements(bot)); } catch (_) {}
       ipcSetStatus('online');
-      console.log(`\n  ${c.green}${c.bold}✅ JOINED THE SERVER${c.reset} ${c.gray}— ${c.white}${username}${c.gray} is now in ${c.white}${host}:${port}${c.gray}.${c.reset}`);
-      console.log(`  ${c.gray}  Type a message to chat. Start with ${c.yellow}/${c.gray} for a server command, ${c.yellow}!${c.gray} for a bot command.${c.reset}`);
-      console.log(`  ${c.gray}  Type ${c.yellow}!help${c.gray} for bot commands, ${c.yellow}quit${c.gray} or ${c.yellow}Ctrl+C${c.gray} to exit.${c.reset}\n`);
-
-      // Switch to the target server within SWITCH_FALLBACK whether or not a
-      // login prompt ever shows up (covers servers that don't require auth).
-      if (AUTO_LOGIN) switchFallback = setTimeout(doSwitch, SWITCH_FALLBACK);
+      if (firstSpawn) {
+        console.log(`\n  ${c.green}${c.bold}✅ JOINED THE SERVER${c.reset} ${c.gray}— ${c.white}${username}${c.gray} is now in ${c.white}${host}:${port}${c.gray}.${c.reset}`);
+        console.log(`  ${c.gray}  Type a message to chat. Start with ${c.yellow}/${c.gray} for a server command, ${c.yellow}!${c.gray} for a bot command.${c.reset}`);
+        console.log(`  ${c.gray}  Type ${c.yellow}!help${c.gray} for bot commands, ${c.yellow}quit${c.gray} or ${c.yellow}Ctrl+C${c.gray} to exit.${c.reset}\n`);
+        // Arm the switch-to-oneblock fallback only on the first spawn.
+        if (AUTO_LOGIN) switchFallback = setTimeout(doSwitch, SWITCH_FALLBACK);
+      } else {
+        ui.info('Sub-server spawn', `moved to a new server (${host}:${port})`);
+      }
     });
 
     // Auto-respawn is on by default (createBot respawn option) — just log it cleanly.
