@@ -231,6 +231,7 @@ async function main() {
   let bot = null;
   let listenerAttached = false;
   let shuttingDown = false; // true once the scheduled daily shutdown fires — blocks reconnect
+  let lastJoinBannerAt = 0; // timestamp of last "JOINED THE SERVER" banner (debounce across reconnects)
 
   // ---- Discord IPC ----
   const IPC_FILE = require('path').join(__dirname, '.discord-ipc.json');
@@ -1632,15 +1633,18 @@ async function main() {
       clearTimeout(watchdog);
       try { bot.pathfinder.setMovements(new Movements(bot)); } catch (_) {}
       ipcSetStatus('online');
-      if (firstSpawn) {
+      const now = Date.now();
+      const showBanner = now - lastJoinBannerAt > 20000; // debounce: skip if banner shown <20s ago (sub-server transfer)
+      if (showBanner) {
+        lastJoinBannerAt = now;
         console.log(`\n  ${c.green}${c.bold}✅ JOINED THE SERVER${c.reset} ${c.gray}— ${c.white}${username}${c.gray} is now in ${c.white}${host}:${port}${c.gray}.${c.reset}`);
         console.log(`  ${c.gray}  Type a message to chat. Start with ${c.yellow}/${c.gray} for a server command, ${c.yellow}!${c.gray} for a bot command.${c.reset}`);
         console.log(`  ${c.gray}  Type ${c.yellow}!help${c.gray} for bot commands, ${c.yellow}quit${c.gray} or ${c.yellow}Ctrl+C${c.gray} to exit.${c.reset}\n`);
-        // Arm the switch-to-oneblock fallback only on the first spawn.
-        if (AUTO_LOGIN) switchFallback = setTimeout(doSwitch, SWITCH_FALLBACK);
       } else {
-        ui.info('Sub-server spawn', `moved to a new server (${host}:${port})`);
+        ui.info('Sub-server', `transferred to ${host}:${port}`);
       }
+      // Arm the switch-to-oneblock fallback only on the first spawn of each connection.
+      if (firstSpawn && AUTO_LOGIN) switchFallback = setTimeout(doSwitch, SWITCH_FALLBACK);
     });
 
     // Auto-respawn is on by default (createBot respawn option) — just log it cleanly.
