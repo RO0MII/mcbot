@@ -1579,12 +1579,14 @@ async function main() {
     let switchFallback = null; // timer that switches anyway if no login prompt arrives
     let reswitchTimer = null;  // periodic "/server oneblock" so a restart bounce gets us back
     let lobbyReswitchAt = 0;   // debounce for restart-message-triggered re-switching
+    let verifying = false;    // true while GUARD bot-check is in progress — freeze all activity
+    let verifyTimer = null;
 
     // Send the server-switch command exactly once per connection, then keep a
     // periodic re-send going so a later sub-server restart (which bounces us to
     // the lobby) always lands us back on oneblock.
     function doSwitch() {
-      if (switched || !bot || !bot.player) return;
+      if (verifying || switched || !bot || !bot.player) return;
       switched = true;
       if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
       try { bot.chat(SWITCH_COMMAND); ui.ok('Server switch', SWITCH_COMMAND); } catch (_) {}
@@ -1607,7 +1609,7 @@ async function main() {
 
     // Send the login command once, then switch SWITCH_AFTER_LOGIN ms later.
     function doLogin() {
-      if (loggedIn || !bot || !bot.player) return;
+      if (verifying || loggedIn || !bot || !bot.player) return;
       loggedIn = true;
       try { bot.chat(LOGIN_COMMAND); ui.ok('Auto-login', `sent ${LOGIN_COMMAND}`); } catch (_) {}
       setTimeout(doSwitch, SWITCH_AFTER_LOGIN);
@@ -1644,6 +1646,20 @@ async function main() {
     bot.on('messagestr', (message) => {
       process.stdout.write(`\r  ${c.cyan}${c.bold}[CHAT]${c.reset} ${c.white}${message}${c.reset}\n`);
       ipcPushChat(message); // forward to Discord bridge
+      // GUARD anti-bot verification — freeze all activity until it passes (20s max).
+      if (/you are being verified|please do not move.*automatic/i.test(message)) {
+        verifying = true;
+        if (verifyTimer) clearTimeout(verifyTimer);
+        verifyTimer = setTimeout(() => { verifying = false; verifyTimer = null; }, 20000);
+        ui.warn('GUARD', 'bot-check in progress — frozen for up to 20s');
+        return; // don't process this line any further
+      }
+      if (/verification.*(?:complete|passed|success)|you(?:'ve| have) passed/i.test(message) && verifying) {
+        verifying = false;
+        if (verifyTimer) { clearTimeout(verifyTimer); verifyTimer = null; }
+        ui.ok('GUARD', 'verification passed — resuming');
+      }
+      if (verifying) return; // still verifying — drop everything
       // Auto-login: the server asks us to authenticate -> send LOGIN_COMMAND.
       if (AUTO_LOGIN && !loggedIn && LOGIN_PROMPT.test(message)) doLogin();
       // Restart / "sent to lobby" -> re-join oneblock fast (debounced 30s).
@@ -1682,6 +1698,8 @@ async function main() {
       clearTimeout(watchdog);
       if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
       if (reswitchTimer) { clearTimeout(reswitchTimer); reswitchTimer = null; }
+      if (verifyTimer) { clearTimeout(verifyTimer); verifyTimer = null; }
+      verifying = false;
       if (mining) mining = null; // stop the mine loop; the old bot is gone
       unseenTriviaQ = null;      // clear any pending learn-question on disconnect
       ipcSetStatus('offline');
