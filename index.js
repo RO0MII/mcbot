@@ -1198,7 +1198,7 @@ async function main() {
     ui.info('Game: fill-blank', `solving "${token}" — sending in ${(delay / 1000).toFixed(1)}s`);
     setTimeout(() => {
       if (!gameMode || !bot || !bot.player) return;
-      const r = resolveFill(token, fillMissingOnly);
+      const r = resolveFill(token, FILL_MISSING_LETTERS_ONLY);
       if (!r || !r.send) { ui.warn('Fill unsolved', token); return; }
       const send = toTitleCase(r.send);
       const note = r.missing ? `${c.white}${send}${c.gray} (missing letters of ${r.full})` : `${c.white}${send}`;
