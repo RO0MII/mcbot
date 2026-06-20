@@ -306,6 +306,8 @@ async function main() {
   let afkTimer = null;   // setInterval handle while anti-AFK is on
   let following = null;  // username we're currently following, or null
   let mining = null;     // { pos: Vec3 } while !oneblock is running, or null
+  let cobaleMining = false; // true while !cobale is running
+  let cobalePos = null;     // { Vec3 } fixed position from !cobaleset
   let gameMode = true;   // auto-answering is ON by default (24/7)
   let fillMissingOnly = FILL_MISSING_LETTERS_ONLY; // sticky: send only the missing letters for fill games
 
@@ -597,6 +599,13 @@ async function main() {
     try { bot.pathfinder.setGoal(null); } catch (_) {}
   }
 
+  function stopCobale() {
+    cobaleMining = false;
+    cobalePos = null;
+    try { bot.stopDigging(); } catch (_) {}
+    try { bot.pathfinder.setGoal(null); } catch (_) {}
+  }
+
   // Pick the FASTEST tool for this block that still has more than TOOL_BREAK_BUFFER
   // uses left — so !oneblock never digs with a tool that's about to break.
   // Returns { tool, skipped } where `tool` may be null (= dig with bare hand).
@@ -662,6 +671,87 @@ async function main() {
         if (!mining) break;
       }
       await new Promise((r) => setTimeout(r, 400)); // small breather before the next pass
+    }
+  }
+
+  // Find nearby stone block within 12 blocks.
+  function findCobblestone() {
+    const targets = ['stone'];
+    const pos = bot.entity.position;
+    for (let dx = -12; dx <= 12; dx++) {
+      for (let dy = -5; dy <= 5; dy++) {
+        for (let dz = -12; dz <= 12; dz++) {
+          const block = bot.blockAt(pos.offset(dx, dy, dz));
+          if (block && targets.includes(block.name) && block.diggable) return block;
+        }
+      }
+    }
+    return null;
+  }
+
+  // Mine cobblestone in a loop using a stone pickaxe. When the pick is about to
+  // break, tell the server in chat and stop.
+  async function cobaleLoop() {
+    while (cobaleMining) {
+      let pos;
+      if (cobalePos) {
+        pos = cobalePos;
+      } else {
+        const cobble = findCobblestone();
+        if (!cobble) {
+          await new Promise((r) => setTimeout(r, 1000));
+          continue;
+        }
+        pos = cobble.position;
+      }
+
+      if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > MINE_REACH) {
+        try {
+          await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
+        } catch (_) {
+          if (!cobaleMining) break;
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
+        }
+      }
+      if (!cobaleMining) break;
+
+      const picks = bot.inventory.items().filter((i) => i.name.endsWith('_pickaxe'));
+      const bestPick = picks.sort((a, b) => {
+        const order = ['wooden_pickaxe', 'stone_pickaxe', 'iron_pickaxe', 'diamond_pickaxe', 'netherite_pickaxe'];
+        return order.indexOf(b.name) - order.indexOf(a.name);
+      })[0];
+      if (!bestPick) {
+        try { bot.chat("I need a pickaxe to mine cobblestone!"); } catch (_) {}
+        cobaleMining = false;
+        break;
+      }
+
+      if (bestPick.maxDurability) {
+        const left = bestPick.maxDurability - (bestPick.durabilityUsed || 0);
+        if (left <= TOOL_BREAK_BUFFER) {
+          try { bot.chat("My pickaxe broke! I need a new one."); } catch (_) {}
+          cobaleMining = false;
+          break;
+        }
+      }
+
+      try { await bot.equip(bestPick, 'hand'); } catch (_) {}
+
+      const block = bot.blockAt(pos);
+      if (!block || block.name !== 'stone' || !block.diggable) {
+        await new Promise((r) => setTimeout(r, 500));
+        continue;
+      }
+
+      ui.info('Mining ' + block.name, 'x=' + pos.x + ' y=' + pos.y + ' z=' + pos.z);
+      try {
+        await bot.dig(block, true);
+        ui.ok('Mined ' + block.name, 'x=' + pos.x + ' y=' + pos.y + ' z=' + pos.z);
+      } catch (_) {
+        if (!cobaleMining) break;
+      }
+      await new Promise((r) => setTimeout(r, 400));
     }
   }
 
@@ -1404,9 +1494,12 @@ async function main() {
           ['!autovault on|off', 'Toggle the 10-min auto-vault cycle'],
           ['!invtrade', `Run the ${TRADE_OWNER} trade flow now (test)`],
           ['!follow <name>', 'Follow a player'],
+          ['!cobale', 'Auto-find and mine cobblestone'],
+          ['!cobaleset x y z', 'Mine cobblestone at set pos'],
+          ['!cobale stop', 'Stop cobblestone mining'],
           ['!oneblock x y z', 'Mine a block on loop (tool-safe)'],
           ['!oneblock stop', 'Stop one-block mining'],
-          ['!stop', 'Stop following / mining'],
+          ['!stop', 'Stop following / mining / cobale'],
           ['!quit', 'Disconnect and exit'],
         ], 'Handled locally — never sent to the server.  Bot auto-respawns on death.');
         break;
@@ -1569,11 +1662,53 @@ async function main() {
         break;
       }
 
-      case 'stop':
-        if (mining) { stopMining(); ui.warn('Stopped mining'); }
-        if (following) { stopFollow(); ui.warn('Stopped following'); }
-        if (!mining && !following) { stopFollow(); stopMining(); ui.warn('Nothing to stop'); }
+      case 'cobale':
+      case 'cobble': {
+        if (!connected) { console.log(notConnected); break; }
+        if (arg.toLowerCase() === 'stop' || arg.toLowerCase() === 'off') {
+          if (cobaleMining) { stopCobale(); ui.warn('Cobale mining OFF', 'stopped'); }
+          else ui.warn('Not mining cobblestone', 'nothing to stop');
+          break;
+        }
+        stopFollow();
+        stopCobale();
+        cobaleMining = true;
+        ui.ok('Cobale mining ON', 'mining cobblestone with stone pickaxe  ·  !cobale stop to stop');
+        cobaleLoop().catch((e) => ui.err('Cobale stopped', e.message || String(e)));
         break;
+      }
+
+      case 'cobaleset':
+      case 'cobbleset': {
+        if (!connected) { console.log(notConnected); break; }
+        const nums = arg.split(/[\s,]+/).filter(Boolean).map(Number);
+        let x, y, z;
+        if (nums.length === 3 && nums.every((n) => !isNaN(n))) {
+          [x, y, z] = nums.map(Math.floor);
+        } else if (!arg) {
+          const p = bot.entity.position;
+          x = Math.floor(p.x); y = Math.floor(p.y) - 1; z = Math.floor(p.z);
+        } else {
+          ui.err('Usage', 'type  !cobaleset <x y z>');
+          break;
+        }
+        stopFollow();
+        stopCobale();
+        cobalePos = new Vec3(x, y, z);
+        cobaleMining = true;
+        ui.ok('Cobale set', `mining cobblestone at x=${x} y=${y} z=${z}  ·  !cobale stop to stop`);
+        cobaleLoop().catch((e) => ui.err('Cobale stopped', e.message || String(e)));
+        break;
+      }
+
+      case 'stop': {
+        let stopped = false;
+        if (mining) { stopMining(); ui.warn('Stopped mining'); stopped = true; }
+        if (following) { stopFollow(); ui.warn('Stopped following'); stopped = true; }
+        if (cobaleMining) { stopCobale(); ui.warn('Stopped cobale mining'); stopped = true; }
+        if (!stopped) { ui.warn('Nothing to stop'); }
+        break;
+      }
 
       case 'quit':
       case 'exit':
