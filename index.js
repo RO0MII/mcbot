@@ -686,13 +686,13 @@ async function main() {
     }
   }
 
-  // Find nearby stone block within 12 blocks.
+  // Find nearby stone block within 4 blocks.
   function findCobblestone() {
     const targets = ['stone'];
     const pos = bot.entity.position;
-    for (let dx = -12; dx <= 12; dx++) {
-      for (let dy = -5; dy <= 5; dy++) {
-        for (let dz = -12; dz <= 12; dz++) {
+    for (let dx = -4; dx <= 4; dx++) {
+      for (let dy = -4; dy <= 4; dy++) {
+        for (let dz = -4; dz <= 4; dz++) {
           const block = bot.blockAt(pos.offset(dx, dy, dz));
           if (block && targets.includes(block.name) && block.diggable) return block;
         }
@@ -1705,13 +1705,14 @@ async function main() {
       case 'cobaleset':
       case 'cobbleset': {
         if (!connected) { console.log(notConnected); break; }
-        const nums = arg.split(/[\s,]+/).filter(Boolean).map(Number);
+          const nums = arg.split(/[\s,]+/).filter(Boolean).map(Number);
         let x, y, z;
         if (nums.length === 3 && nums.every((n) => !isNaN(n))) {
           [x, y, z] = nums.map(Math.floor);
         } else if (!arg) {
-          const p = bot.entity.position;
-          x = Math.floor(p.x); y = Math.floor(p.y) - 1; z = Math.floor(p.z);
+          const target = bot.blockAtCursor(4.5);
+          if (!target) { ui.err('No block in range', 'look at a block within 4.5 blocks'); break; }
+          x = target.position.x; y = target.position.y; z = target.position.z;
         } else {
           ui.err('Usage', 'type  !cobaleset <x y z>');
           break;
