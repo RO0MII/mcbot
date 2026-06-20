@@ -14,6 +14,7 @@ const { Vec3 } = require('vec3');
 const DEFAULT_IP = 'play.bananasmp.net';   // Used when you just press Enter on the IP prompt
 const DEFAULT_PORT = 25565;       // Default Minecraft port
 const VERSION = '1.20.1';         // Fixed version = skip the auto-detect ping round-trip, so the FIRST join is fast. Set false to auto-detect.
+const ENABLE_DISCORD = false;     // Set true to start Discord bridge
 const AUTO_RECONNECT = true;      // Keep retrying while the server boots (Aternos)
 const RECONNECT_DELAY = 5000;     // ms between retries
 const DAILY_SHUTDOWN_HOUR = 4;    // hour (0-23, Asia/Colombo) to disconnect and EXIT without reconnecting; set to null to disable
@@ -157,6 +158,17 @@ process.on('unhandledRejection', handleStray);
 // In tmux / nohup / SSH the process should keep running game answers.
 try { process.on('SIGHUP', () => {}); } catch (_) {} // ignore — keep running after SSH drops
 
+// Clean shutdown on Ctrl+C: kill discord, quit bot, exit cleanly.
+process.on('SIGINT', () => {
+  process.removeAllListeners('SIGINT');
+  try {
+    if (discordChild) discordChild.kill();
+    if (typeof bot !== 'undefined' && bot && bot.entity) bot.quit();
+  } catch (_) {}
+  rl.close();
+  process.exit(0);
+});
+
 // Save a key into .env without exposing the value in logs.
 function saveEnvKey(key, value) {
   try {
@@ -259,7 +271,7 @@ async function main() {
       }
     });
   }
-  startDiscordBridge();
+  if (ENABLE_DISCORD) startDiscordBridge();
 
   // Push a reply string to IPC so discord-bridge.js can send it to the Discord channel.
   function ipcPushDiscordReply(text) {
@@ -644,7 +656,7 @@ async function main() {
       // Walk into digging range if we're too far.
       if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > MINE_REACH) {
         try {
-          await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
+          await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 1));
         } catch (_) {
           if (!mining) break;
           ui.warn('Can\'t reach block', 'retrying in 2s');
@@ -689,27 +701,32 @@ async function main() {
     return null;
   }
 
-  // Mine cobblestone in a loop using a stone pickaxe. When the pick is about to
+  // Mine blocks in a loop using the best pickaxe. When the pick is about to
   // break, tell the server in chat and stop.
+  // If cobalePos is set → mine that exact position (any diggable block).
+  // Otherwise → auto-find and mine stone blocks.
   async function cobaleLoop() {
     while (cobaleMining) {
       let pos;
+      let isSetPos = false;
       if (cobalePos) {
         pos = cobalePos;
+        isSetPos = true;
       } else {
-        const cobble = findCobblestone();
-        if (!cobble) {
+        const stone = findCobblestone();
+        if (!stone) {
           await new Promise((r) => setTimeout(r, 1000));
           continue;
         }
-        pos = cobble.position;
+        pos = stone.position;
       }
 
       if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > MINE_REACH) {
         try {
-          await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
+          await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 1));
         } catch (_) {
           if (!cobaleMining) break;
+          ui.warn("Can't reach block", 'retrying in 2s');
           await new Promise((r) => setTimeout(r, 2000));
           continue;
         }
@@ -722,7 +739,7 @@ async function main() {
         return order.indexOf(b.name) - order.indexOf(a.name);
       })[0];
       if (!bestPick) {
-        try { bot.chat("I need a pickaxe to mine cobblestone!"); } catch (_) {}
+        try { bot.chat("I need a pickaxe to mine!"); } catch (_) {}
         cobaleMining = false;
         break;
       }
@@ -739,9 +756,16 @@ async function main() {
       try { await bot.equip(bestPick, 'hand'); } catch (_) {}
 
       const block = bot.blockAt(pos);
-      if (!block || block.name !== 'stone' || !block.diggable) {
-        await new Promise((r) => setTimeout(r, 500));
-        continue;
+      if (isSetPos) {
+        if (!block || block.name === 'air' || !block.diggable) {
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
+      } else {
+        if (!block || block.name !== 'stone' || !block.diggable) {
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
       }
 
       ui.info('Mining ' + block.name, 'x=' + pos.x + ' y=' + pos.y + ' z=' + pos.z);
@@ -1494,9 +1518,9 @@ async function main() {
           ['!autovault on|off', 'Toggle the 10-min auto-vault cycle'],
           ['!invtrade', `Run the ${TRADE_OWNER} trade flow now (test)`],
           ['!follow <name>', 'Follow a player'],
-          ['!cobale', 'Auto-find and mine cobblestone'],
-          ['!cobaleset x y z', 'Mine cobblestone at set pos'],
-          ['!cobale stop', 'Stop cobblestone mining'],
+          ['!cobale', 'Auto-find and mine stone'],
+          ['!cobaleset x y z', 'Mine block at set position'],
+          ['!cobale stop', 'Stop stone mining'],
           ['!oneblock x y z', 'Mine a block on loop (tool-safe)'],
           ['!oneblock stop', 'Stop one-block mining'],
           ['!stop', 'Stop following / mining / cobale'],
@@ -1667,13 +1691,13 @@ async function main() {
         if (!connected) { console.log(notConnected); break; }
         if (arg.toLowerCase() === 'stop' || arg.toLowerCase() === 'off') {
           if (cobaleMining) { stopCobale(); ui.warn('Cobale mining OFF', 'stopped'); }
-          else ui.warn('Not mining cobblestone', 'nothing to stop');
+          else ui.warn('Not mining', 'nothing to stop');
           break;
         }
         stopFollow();
         stopCobale();
         cobaleMining = true;
-        ui.ok('Cobale mining ON', 'mining cobblestone with stone pickaxe  ·  !cobale stop to stop');
+        ui.ok('Cobale mining ON', 'mining stone with pickaxe  ·  !cobale stop to stop');
         cobaleLoop().catch((e) => ui.err('Cobale stopped', e.message || String(e)));
         break;
       }
@@ -1696,7 +1720,7 @@ async function main() {
         stopCobale();
         cobalePos = new Vec3(x, y, z);
         cobaleMining = true;
-        ui.ok('Cobale set', `mining cobblestone at x=${x} y=${y} z=${z}  ·  !cobale stop to stop`);
+        ui.ok('Cobale set', `mining block at x=${x} y=${y} z=${z}  ·  !cobale stop to stop`);
         cobaleLoop().catch((e) => ui.err('Cobale stopped', e.message || String(e)));
         break;
       }
