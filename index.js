@@ -322,6 +322,7 @@ async function main() {
   let cobalePos = null;     // { Vec3 } fixed position from !cobaleset
   let gameMode = true;   // auto-answering is ON by default (24/7)
   let fillMissingOnly = FILL_MISSING_LETTERS_ONLY; // sticky: send only the missing letters for fill games
+  let bedMode = false;       // !bed on/off — auto-sleep at night
 
   const notConnected = `  ${c.orange}▲${c.reset} ${c.orange}${c.bold}Not connected${c.reset} ${c.gray}— wait for "JOINED THE SERVER".${c.reset}`;
 
@@ -722,6 +723,14 @@ async function main() {
       }
 
       if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > MINE_REACH) {
+        // For a set position, walk there WITHOUT digging so the bot doesn't
+        // tunnel through (and mine) other blocks on the way — it must only mine
+        // the exact block that was set. Restore the normal movements after.
+        if (isSetPos) {
+          const noDig = new Movements(bot);
+          noDig.canDig = false;
+          bot.pathfinder.setMovements(noDig);
+        }
         try {
           await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 1));
         } catch (_) {
@@ -729,6 +738,10 @@ async function main() {
           ui.warn("Can't reach block", 'retrying in 2s');
           await new Promise((r) => setTimeout(r, 2000));
           continue;
+        } finally {
+          if (isSetPos) {
+            try { bot.pathfinder.setMovements(new Movements(bot)); } catch (_) {}
+          }
         }
       }
       if (!cobaleMining) break;
@@ -776,6 +789,52 @@ async function main() {
         if (!cobaleMining) break;
       }
       await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+
+  // Find the nearest bed within 8 blocks.
+  function findBed() {
+    const pos = bot.entity.position;
+    for (let dx = -8; dx <= 8; dx++) {
+      for (let dy = -3; dy <= 3; dy++) {
+        for (let dz = -8; dz <= 8; dz++) {
+          const block = bot.blockAt(pos.offset(dx, dy, dz));
+          if (block && block.name.endsWith('_bed')) return block;
+        }
+      }
+    }
+    return null;
+  }
+
+  // Auto-sleep cycle: find nearest bed, go to it, sleep until morning.
+  let bedTimer = null;
+  async function bedLoop() {
+    while (bedMode) {
+      if (!bot || !bot.entity) { await new Promise((r) => setTimeout(r, 1000)); continue; }
+      if (bot.isSleeping) { await new Promise((r) => setTimeout(r, 1000)); continue; }
+
+      const tod = bot.time.timeOfDay;
+      // Night starts around 12500, ends around 23500 (0 = dawn)
+      if (tod < 12500 || tod > 23500) { await new Promise((r) => setTimeout(r, 5000)); continue; }
+
+      const bed = findBed();
+      if (!bed) { await new Promise((r) => setTimeout(r, 5000)); continue; }
+
+      if (bot.entity.position.distanceTo(bed.position.offset(0.5, 0, 0.5)) > 3) {
+        try { await bot.pathfinder.goto(new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2)); } catch (_) {}
+      }
+
+      try {
+        await bot.sleep(bed);
+        ui.ok('Sleeping', 'good night!');
+      } catch (_) {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+
+      // Wait while sleeping — time will pass faster ticks
+      while (bedMode && bot && bot.entity && bot.isSleeping) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
     }
   }
 
@@ -1521,6 +1580,7 @@ async function main() {
           ['!cobale', 'Auto-find and mine stone'],
           ['!cobaleset x y z', 'Mine block at set position'],
           ['!cobale stop', 'Stop stone mining'],
+          ['!bed on|off', 'Auto-sleep in bed at night'],
           ['!oneblock x y z', 'Mine a block on loop (tool-safe)'],
           ['!oneblock stop', 'Stop one-block mining'],
           ['!stop', 'Stop following / mining / cobale'],
@@ -1735,6 +1795,22 @@ async function main() {
         break;
       }
 
+      case 'bed': {
+        const mode = arg.toLowerCase();
+        if (mode === 'on') {
+          bedMode = true;
+          ui.ok('Auto-bed ON', 'will sleep in nearest bed at night  ·  !bed off to stop');
+          bedLoop().catch(() => {});
+        } else if (mode === 'off') {
+          bedMode = false;
+          if (bot && bot.isSleeping) try { bot.wake(); } catch (_) {}
+          ui.warn('Auto-bed OFF', 'no longer auto-sleeping');
+        } else {
+          ui.err('Usage', 'type  !bed on  or  !bed off');
+        }
+        break;
+      }
+
       case 'quit':
       case 'exit':
         ui.ok('Goodbye!', 'disconnecting...');
@@ -1841,6 +1917,8 @@ async function main() {
 
     // Show server chat
     bot.on('messagestr', (message) => {
+      // Filter sleep messages
+      if (/went to bed?|sleeping|night.?skip|woke up|you may not rest|bed.?obstructed|bed.?missing|can.?sleep|player.?sleep/i.test(message)) return;
       process.stdout.write(`\r  ${c.cyan}${c.bold}[CHAT]${c.reset} ${c.white}${message}${c.reset}\n`);
       ipcPushChat(message); // forward to Discord bridge
       // GUARD anti-bot verification — freeze all activity until it passes (20s max).
