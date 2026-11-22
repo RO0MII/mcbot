@@ -402,6 +402,7 @@ class ManagedBot {
       inventoryPreview: inv.items,
       inventoryUsed: inv.used,
       inventoryTotal: 36,
+      scoreboard: this.bot ? scoreboardSnapshot(this.bot) : null,
       heldItem: this.bot && this.bot.heldItem ? itemJson(this.bot.heldItem) : null,
       selectedSlot: this.bot && Number.isInteger(this.bot.quickBarSlot) ? this.bot.quickBarSlot : 0,
       armor: armorPreview(this.bot),
@@ -659,6 +660,11 @@ class ManagedBot {
     // AFK GUIs: some servers open a chest-style menu shortly after /afk.
     // When armed (see sendChat), click its first slot automatically.
     bot.on('windowOpen', (window) => this._onWindowOpen(window));
+
+    // Sidebar scoreboard updates — keep the panel tracker live.
+    ['scoreUpdated', 'scoreRemoved', 'scoreboardTitleChanged', 'scoreboardCreated', 'scoreboardDeleted', 'scoreboardPosition'].forEach((ev) => {
+      try { bot.on(ev, () => this._refresh(true)); } catch (_) {}
+    });
 
     // Keep the player count fresh without flooding the console with the
     // server's join/leave spam (NPC shop/auction bots churn constantly).
@@ -1229,6 +1235,46 @@ function armorPreview(bot) {
     const slots = bot && bot.inventory ? bot.inventory.slots : [];
     return [5, 6, 7, 8].map((i) => itemJson(slots[i]));
   } catch (_) { return [null, null, null, null]; }
+}
+
+function scoreboardSnapshot(bot) {
+  try {
+    const sb = bot && bot.scoreboard && bot.scoreboard.sidebar;
+    if (!sb) return null;
+    let title = sb.title == null ? 'Scoreboard' : sb.title;
+    if (typeof title !== 'string') {
+      try { title = title.toString(); } catch (_) { title = 'Scoreboard'; }
+    }
+    const items = (sb.items || []).slice(0, 24).map((it) => {
+      let label = it.name;
+      try { if (it.displayName && typeof it.displayName.toString === 'function') label = it.displayName.toString(); } catch (_) {}
+      const clean = String(label).replace(/§./g, '').trim();
+      if (!clean) return null;
+      // Sidebar labels usually carry the real value (Money 1K, Shards 537).
+      const m = clean.match(/^(.*?)([\d,.]+)\s*([KMB])?\s*$/i);
+      let amount = null;
+      let amountText = '';
+      let nameLabel = clean.replace(/^[^A-Za-z0-9$]+/, '').trim() || clean;
+      if (m && m[2]) {
+        let n = parseFloat(m[2].replace(/,/g, ''));
+        if (Number.isFinite(n)) {
+          const mult = { K: 1e3, M: 1e6, B: 1e9 }[(m[3] || '').toUpperCase()] || 1;
+          amount = Math.round(n * mult);
+          amountText = `${m[2]}${m[3] || ''}`.trim();
+          nameLabel = (m[1] || '').replace(/^[^A-Za-z0-9$]+/, '').trim() || clean;
+        }
+      }
+      return {
+        name: it.name,
+        value: Number(it.value) || 0,
+        label: clean,
+        nameLabel,
+        amount,
+        amountText,
+      };
+    }).filter(Boolean);
+    return { title: String(title).replace(/§./g, '').trim() || 'Scoreboard', items };
+  } catch (_) { return null; }
 }
 
 function playerList(bot) {

@@ -687,6 +687,14 @@ function bindEvents() {
       return;
     }
   });
+  document.addEventListener('click', (e) => {
+    const jump = e.target.closest('[data-bp-jump]');
+    if (jump) {
+      e.preventDefault();
+      const el = document.getElementById(jump.dataset.bpJump);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  });
   document.addEventListener('scroll', (e) => {
     if (!e.target || e.target.id !== 'term-lines') return;
     const box = e.target;
