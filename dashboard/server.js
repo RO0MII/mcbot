@@ -1557,6 +1557,16 @@ async function handleApi(req, res, url) {
 
   if (parts[1] === 'state' && method === 'GET') return json(res, 200, snapshot());
 
+  if (parts[1] === 'logs' && method === 'GET') {
+    const limit = Math.min(1200, Math.max(50, parseInt(url.searchParams.get('limit') || '600', 10)));
+    const entries = [];
+    Array.from(manager.bots.values()).forEach((b) => {
+      b.logs.slice(-220).forEach((entry) => entries.push({ id: b.id, name: b.name, entry }));
+    });
+    entries.sort((a, b) => a.entry.t - b.entry.t);
+    return json(res, 200, { entries: entries.slice(-limit), bots: Array.from(manager.bots.values()).map((b) => b.public()) });
+  }
+
   if (parts[1] === 'events' && method === 'GET') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',

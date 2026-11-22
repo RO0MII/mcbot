@@ -10,8 +10,8 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20261122b" />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css?v=20261122g" />
 </head>
 <body>
   <!-- ── icon sprite ─────────────────────────────────────────────────────── -->
@@ -55,6 +55,8 @@
       <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10" width="15" height="10.5" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14.5v2"/></symbol>
       <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
       <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12M7.5 10.5 12 15l4.5-4.5M4 20h16"/></symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24"><rect x="7" y="5" width="3.4" height="14" rx="1"/><rect x="13.6" y="5" width="3.4" height="14" rx="1"/></symbol>
     </defs>
   </svg>
 
@@ -105,6 +107,9 @@
       <nav class="nav" aria-label="Main navigation">
         <button class="nav__item is-active" data-view="dashboard">
           <svg class="ico"><use href="#i-grid"/></svg><span>Dashboard</span>
+        </button>
+        <button class="nav__item" data-view="terminal">
+          <svg class="ico"><use href="#i-terminal"/></svg><span>Terminal</span>
         </button>
         <button class="nav__item" data-view="servers">
           <svg class="ico"><use href="#i-server"/></svg><span>Servers</span><em id="nav-servers-count" class="nav__count">0</em>
@@ -185,6 +190,7 @@
   <!-- ── mobile nav ─────────────────────────────────────────────────────── -->
   <nav class="mobilenav hidden" id="mobilenav" aria-label="Mobile navigation">
     <button class="mobilenav__item is-active" data-view="dashboard"><svg class="ico"><use href="#i-grid"/></svg><span>Home</span></button>
+    <button class="mobilenav__item" data-view="terminal"><svg class="ico"><use href="#i-terminal"/></svg><span>Terminal</span></button>
     <button class="mobilenav__item" data-view="servers"><svg class="ico"><use href="#i-server"/></svg><span>Servers</span></button>
     <button class="mobilenav__add" id="mobile-add" type="button" aria-label="Add bot"><svg class="ico"><use href="#i-plus"/></svg></button>
     <button class="mobilenav__item" data-view="groups"><svg class="ico"><use href="#i-group"/></svg><span>Groups</span></button>
@@ -198,9 +204,9 @@
   <div id="item-tip" class="item-tip" hidden></div>
   <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
 
-  <script src="app.js?v=20261122b" defer></script>
-  <script src="console.js?v=20261122b" defer></script>
-  <script src="modals.js?v=20261122b" defer></script>
-  <script src="actions.js?v=20261122b" defer></script>
+  <script src="app.js?v=20261122g" defer></script>
+  <script src="console.js?v=20261122g" defer></script>
+  <script src="modals.js?v=20261122g" defer></script>
+  <script src="actions.js?v=20261122g" defer></script>
 </body>
 </html>

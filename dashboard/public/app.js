@@ -44,6 +44,8 @@ const PAGES = {
   dashboard: { title: 'Command center', sub: 'Everything your bots are doing, at a glance.' },
   servers: { title: 'Servers', sub: 'Group bots by server and cut power to a whole server at once.' },
   groups: { title: 'Bot groups', sub: 'Bundle bots into groups and control each collection with one switch.' },
+  bot: { title: 'Bot profile', sub: 'Everything this bot is doing, on one page.' },
+  terminal: { title: 'Terminal', sub: 'Every bot, one merged terminal — filter it, search it, command it.' },
   activity: { title: 'Activity', sub: 'A live feed of chat, logins, switches and errors across every bot.' },
 };
 
@@ -69,6 +71,16 @@ const state = {
   activityFilter: 'all',
   activityQuery: '',
   activity: [],
+  terminalLogs: [],
+  botId: null,
+  termLoaded: false,
+  termFilter: 'all',
+  termQuery: '',
+  termTarget: '',
+  termPaused: false,
+  termHistory: [],
+  termHistoryIndex: -1,
+  termTimer: null,
   logs: new Map(),
   consoleId: null,
   unread: false,
@@ -363,7 +375,7 @@ function botCard(bot, i = 0) {
   return `
     <article class="bot-card ${bot.status === 'online' ? 'is-online' : ''} ${peers > 1 ? 'is-shared' : ''}" data-id="${esc(bot.id)}" data-sig="${esc(structuralSig(bot))}" style="--i:${i};--hue:${hue};--server:${sHue}">
       <div class="bot-card__top">
-        <button class="bot-avatar bot-avatar--btn" type="button" style="--hue:${hue}" data-action="player" data-id="${esc(bot.id)}" title="Open ${esc(bot.name)}'s player profile" aria-label="Open ${esc(bot.name)}'s player profile"><span class="avatar-initial">${esc(initial(bot.name))}</span>${skinHeadHtml(bot.name)}<span class="status-dot ${st.dot}"></span></button>
+        <button class="bot-avatar bot-avatar--btn" type="button" style="--hue:${hue}" data-action="bot-page" data-id="${esc(bot.id)}" title="Open ${esc(bot.name)}'s full profile" aria-label="Open ${esc(bot.name)}'s full profile"><span class="avatar-initial">${esc(initial(bot.name))}</span>${skinHeadHtml(bot.name)}<span class="status-dot ${st.dot}"></span></button>
         <div class="bot-id">
           <h3 title="${esc(bot.name)}">${esc(bot.name)}</h3>
           <p title="${esc(bot.host)}:${bot.port}"><i class="server-dot"></i>${esc(serverLabel(bot))}</p>
@@ -395,6 +407,7 @@ function botCard(bot, i = 0) {
         <button class="btn btn-ghost btn-sm" data-action="console" data-id="${esc(bot.id)}">
           ${icon('terminal')}<span class="hide-sm">Console</span>
         </button>
+        <button class="icon-btn" data-action="bot-page" data-id="${esc(bot.id)}" title="Open full bot page" aria-label="Open ${esc(bot.name)} full page">${icon('arrow')}</button>
         <button class="icon-btn" data-action="restart" data-id="${esc(bot.id)}" title="Restart" aria-label="Restart ${esc(bot.name)}">${icon('restart')}</button>
         <button class="icon-btn" data-action="edit" data-id="${esc(bot.id)}" title="Edit" aria-label="Edit ${esc(bot.name)}">${icon('edit')}</button>
         <button class="icon-btn is-danger" data-action="delete" data-id="${esc(bot.id)}" title="Delete" aria-label="Delete ${esc(bot.name)}">${icon('trash')}</button>
@@ -786,6 +799,363 @@ function activityHtml() {
     </div>`;
 }
 
+/* ── single bot page ────────────────────────────────────────────────────── */
+async function openBotPage(id) {
+  const bot = findBot(id);
+  if (!bot) return;
+  if ($('#console-drawer') && $('#console-drawer').classList.contains('is-open')) closeConsole(true);
+  state.botId = id;
+  state.view = 'bot';
+  updateChrome();
+  renderView();
+  const title = $('#page-title');
+  const sub = $('#page-sub');
+  if (title) title.textContent = bot.name;
+  if (sub) sub.textContent = `${bot.host}:${bot.port} · ${statusMeta(bot).label}`;
+  if (window.innerWidth <= 1080) window.scrollTo({ top: 0, behavior: 'smooth' });
+  if (!state.logs.get(id) || !state.logs.get(id).length) {
+    try {
+      const data = await api(`/api/bots/${id}/logs`);
+      state.logs.set(id, Array.isArray(data.logs) ? data.logs : []);
+      if (state.view === 'bot' && state.botId === id) renderView();
+    } catch (_) {}
+  }
+}
+
+function bpMetric(iconName, label, value, sub = '', tone = '') {
+  return `<div class="bpmetric ${tone}">
+    <span>${icon(iconName)} ${esc(label)}</span>
+    <b>${esc(value)}</b>
+    ${sub ? `<em>${esc(sub)}</em>` : ''}
+  </div>`;
+}
+
+function bpRecentRow(entry) {
+  return `<div class="brecent__row kind-${esc(entry.kind || 'chat')}">
+    <time>${fmtClock(entry.t)}</time>
+    <span class="brecent__kind">${esc(kindLabel(entry.kind))}</span>
+    <span class="brecent__text">${esc(entry.text)}</span>
+  </div>`;
+}
+
+function appendBotRecent(entry) {
+  const list = $('#bp-recent');
+  if (!list) return;
+  const empty = list.querySelector('.brecent__empty');
+  if (empty) list.innerHTML = '';
+  list.insertAdjacentHTML('afterbegin', bpRecentRow(entry));
+  while (list.children.length > 8) list.lastElementChild.remove();
+}
+
+function botPageHtml(id) {
+  const bot = findBot(id) || state.bots[0];
+  if (!bot) {
+    return `${pageHead('Bot profile', 'No bot selected', 'Pick a bot from the fleet to open its page.', `<button class="btn btn-primary" data-action="add">${icon('plus')}<span>Add bot</span></button>`)}`;
+  }
+  const st = statusMeta(bot);
+  const d = bot.detail || {};
+  const hp = Number.isFinite(bot.health) ? Math.max(0, Math.min(20, bot.health)) : 0;
+  const food = Number.isFinite(bot.food) ? Math.max(0, Math.min(20, bot.food)) : 0;
+  const xp = d.xp || { level: 0, points: 0, progress: 0 };
+  const pos = bot.position ? `${bot.position.x} ${bot.position.y} ${bot.position.z}` : '—';
+  const effects = Array.isArray(d.effects) ? d.effects : [];
+  const armor = Array.isArray(bot.armor) ? bot.armor : [null, null, null, null];
+  const logs = (state.logs.get(bot.id) || []).slice(-8).reverse();
+  const inv = Array.isArray(bot.inventoryPreview) ? bot.inventoryPreview : [];
+  const used = bot.inventoryUsed || 0;
+  const uuid = d.uuid ? String(d.uuid) : '';
+  return `
+    <div class="botpage" style="--hue:${hashHue(bot.name)};--server:${serverHueOf(bot)}">
+      <button class="botpage__back" type="button" data-view="dashboard">${icon('arrow')} Back to fleet</button>
+
+      <header class="botpage__hero">
+        <div class="botpage__avatar"><span class="avatar-initial">${esc(initial(bot.name))}</span>${skinHeadHtml(bot.name, 'botpage__skin')}<span class="status-dot ${st.dot}"></span></div>
+        <div class="botpage__id">
+          <span class="botpage__eyebrow">bot profile</span>
+          <h2>${esc(bot.name)} <span class="pill ${st.pill}"><i></i>${st.label}</span></h2>
+          <p><i class="server-dot"></i>${esc(bot.host)}:${bot.port} <span>· v${esc(bot.version)}</span></p>
+          <div class="player-tags">
+            <span class="ptag">${icon('cube')} ${esc(prettyGameId(d.gamemode))}</span>
+            <span class="ptag">${icon('pin')} ${esc(prettyGameId(d.dimension))}</span>
+            <span class="ptag ${bot.loggedIn ? 'is-good' : ''}">${icon('shield')} ${bot.loggedIn ? 'Logged in' : (bot.autoLogin ? 'Auto login' : 'Not logged in')}</span>
+          </div>
+        </div>
+        <div class="botpage__actions">
+          <button class="btn btn-ghost btn-sm" data-action="console" data-id="${esc(bot.id)}">${icon('terminal')}<span>Console</span></button>
+          <button class="btn btn-ghost btn-sm" data-action="inventory" data-id="${esc(bot.id)}">${icon('chest')}<span>Inventory</span></button>
+          <button class="icon-btn" data-action="restart" data-id="${esc(bot.id)}" title="Restart" aria-label="Restart">${icon('restart')}</button>
+          <button class="icon-btn" data-action="edit" data-id="${esc(bot.id)}" title="Edit" aria-label="Edit">${icon('edit')}</button>
+        </div>
+      </header>
+
+      <div class="botpage__stats">
+        ${bpMetric('heart', 'Health', `${hp}/20`, 'hitpoints', hp <= 6 ? 'is-bad' : '')}
+        ${bpMetric('food', 'Food', `${food}/20`, 'hunger', food <= 6 ? 'is-warn' : '')}
+        ${bpMetric('activity', 'Ping', bot.ping == null ? '—' : `${bot.ping} ms`, 'latency')}
+        ${bpMetric('users', 'Players', bot.players == null ? '—' : bot.players, 'on this server')}
+        ${bpMetric('clock', 'Uptime', bot.joinedAt ? fmtDuration(nowMs() - bot.joinedAt) : '—', 'this session')}
+        ${bpMetric('zap', 'XP level', xp.level || 0, `${xp.points || 0} points`)}
+      </div>
+
+      <div class="botpage__grid">
+        <section class="bpanel">
+          <header class="bpanel__head"><h3>Player</h3><span class="bpanel__live"><i></i> live</span></header>
+          <div class="bkv">
+            <div><span>Position</span><b>${esc(pos)}</b></div>
+            <div><span>Dimension</span><b>${esc(prettyGameId(d.dimension))}</b></div>
+            <div><span>Difficulty</span><b>${esc(d.difficulty ? String(d.difficulty).charAt(0).toUpperCase() + String(d.difficulty).slice(1) : '—')}</b></div>
+            <div><span>Server brand</span><b>${esc(d.serverBrand || '—')}</b></div>
+            <div><span>UUID</span><b title="${esc(uuid)}">${uuid ? `${esc(uuid.slice(0, 8))}…${esc(uuid.slice(-4))}` : '—'}</b></div>
+            <div><span>Effects</span><b>${effects.length ? effects.map((e) => `${esc(prettyGameId(e.name))}${e.amplifier ? ` ${roman(e.amplifier + 1)}` : ''}`).join(', ') : 'None'}</b></div>
+          </div>
+          <p class="bpanel__sub">Equipped</p>
+          <div class="player-gear">
+            <div class="player-gear__slot"><span>Held</span>${slotHtml(bot.heldItem, bot.version)}</div>
+            ${armor.map((it, i) => `<div class="player-gear__slot"><span>${['Helmet', 'Chestplate', 'Leggings', 'Boots'][i]}</span>${slotHtml(it, bot.version)}</div>`).join('')}
+            <div class="player-gear__slot"><span>Off-hand</span>${slotHtml(bot.offhand, bot.version)}</div>
+          </div>
+        </section>
+
+        <section class="bpanel">
+          <header class="bpanel__head"><h3>Recent activity</h3><button class="bpanel__link" type="button" data-action="console" data-id="${esc(bot.id)}">Open console ${icon('arrow')}</button></header>
+          <div class="brecent" id="bp-recent">
+            ${logs.length ? logs.map(bpRecentRow).join('') : `<div class="brecent__empty">${icon('terminal')}No activity yet. Open the console and say hello.</div>`}
+          </div>
+        </section>
+
+        <section class="bpanel bpanel--wide">
+          <header class="bpanel__head"><h3>Inventory</h3><span class="bpanel__count">${used}/36 slots</span><button class="bpanel__link" type="button" data-action="inventory" data-id="${esc(bot.id)}">Open inventory ${icon('arrow')}</button></header>
+          <div class="binv">
+            ${inv.length ? inv.slice(0, 9).map((it) => `<span class="binv__slot">${itemImgHtml(it, bot.version, 'binv__img')}${itemCountHtml(it)}</span>`).join('') : `<span class="binv__empty">${icon('chest')}Inventory is empty</span>`}
+            ${used > Math.min(inv.length, 9) ? `<span class="binv__more">+${used - Math.min(inv.length, 9)} more</span>` : ''}
+          </div>
+          <p class="bpanel__sub">Hotbar first, then storage — the full Minecraft layout lives in the inventory drawer.</p>
+        </section>
+
+        <section class="bpanel">
+          <header class="bpanel__head"><h3>Session</h3><span class="bpanel__live"><i></i> ${st.label}</span></header>
+          <div class="bkv">
+            <div><span>Auto-eat</span><b>${bot.autoEat ? 'On' : 'Off'}</b></div>
+            <div><span>Anti-AFK</span><b>${bot.antiAfk ? 'On' : 'Off'}</b></div>
+            <div><span>Auto-reconnect</span><b>${bot.autoReconnect ? 'On' : 'Off'}</b></div>
+            <div><span>Auto-login</span><b>${bot.autoLogin ? 'On' : 'Off'}</b></div>
+            <div><span>Login attempts</span><b>${bot.loginAttempts || 0}/5</b></div>
+            <div><span>Version</span><b>${esc(bot.version)}</b></div>
+          </div>
+        </section>
+      </div>
+
+      <form class="term-composer" id="bot-command-form" data-id="${esc(bot.id)}" autocomplete="off">
+        <input id="bot-command-input" type="text" maxlength="250" placeholder="Message or /command for ${esc(bot.name)}…" aria-label="Command for ${esc(bot.name)}" spellcheck="false" />
+        <button class="btn btn-primary" type="submit">${icon('send')}<span>Send</span></button>
+      </form>
+    </div>`;
+}
+
+async function submitBotCommand(form) {
+  const id = form.dataset.id;
+  const input = form.querySelector('input');
+  const message = String((input && input.value) || '').trim();
+  if (!message) return;
+  try {
+    await api(`/api/bots/${id}/chat`, { method: 'POST', body: JSON.stringify({ message }) });
+    if (input) input.value = '';
+    toast('ok', 'Sent', message);
+  } catch (e) {
+    toast('err', 'Could not send', e.message || String(e));
+  }
+}
+
+/* ── terminal page ──────────────────────────────────────────────────────── */
+async function loadTerminal() {
+  if (state.termLoaded) return;
+  try {
+    const data = await api('/api/logs?limit=600');
+    if (Array.isArray(data.entries)) state.terminalLogs = data.entries;
+    state.termLoaded = true;
+    if (!state.termTarget || state.termTarget === 'all' || !state.bots.some((b) => b.id === state.termTarget)) {
+      const first = state.bots.find((b) => b.status === 'online') || state.bots[0];
+      state.termTarget = first ? first.id : '';
+    }
+    if (state.view === 'terminal') renderView();
+  } catch (_) {}
+}
+
+function termLogsForTarget() {
+  if (!state.termTarget) return [];
+  return state.terminalLogs.filter((x) => x.id === state.termTarget);
+}
+function termCounts() {
+  const base = termLogsForTarget();
+  const c = { total: base.length, chat: 0, system: 0, err: 0 };
+  base.forEach((x) => {
+    const k = x.entry.kind || 'chat';
+    if (['chat', 'sent'].includes(k)) c.chat += 1;
+    else c.system += 1;
+    if (['err', 'warn'].includes(k)) c.err += 1;
+  });
+  return c;
+}
+
+function termMatches(item) {
+  const e = item.entry;
+  const kind = e.kind || 'chat';
+  if (!state.termTarget || item.id !== state.termTarget) return false;
+  if (state.termFilter === 'chat' && !['chat', 'sent'].includes(kind)) return false;
+  if (state.termFilter === 'system' && ['chat', 'sent'].includes(kind)) return false;
+  if (state.termFilter === 'errors' && !['err', 'warn'].includes(kind)) return false;
+  const q = state.termQuery.trim().toLowerCase();
+  if (q && !`${item.name} ${e.text}`.toLowerCase().includes(q)) return false;
+  return true;
+}
+
+function termFiltered() {
+  return state.terminalLogs.filter(termMatches);
+}
+
+function terminalLineHtml(item) {
+  const e = item.entry;
+  const kind = e.kind || 'chat';
+  const bot = findBot(item.id);
+  return `<div class="tline kind-${esc(kind)}">
+    <time>${fmtClock(e.t)}</time>
+    <span class="tline__bot"><i style="background:hsl(${bot ? serverHueOf(bot) : hashHue(item.name)} 70% 55%)"></i>${esc(item.name)}</span>
+    <span class="tline__kind">${esc(kindLabel(kind))}</span>
+    <span class="tline__text">${esc(e.text)}</span>
+  </div>`;
+}
+
+function renderTerminalLines() {
+  const box = $('#term-lines');
+  if (!box) return;
+  const items = termFiltered();
+  box.innerHTML = items.length
+    ? items.map(terminalLineHtml).join('')
+    : `<div class="term-empty">${icon('search')}<b>No lines match</b><span>Change the target, filter or search.</span></div>`;
+  const all = termCounts();
+  const count = $('#term-count');
+  if (count) count.textContent = all.total.toLocaleString();
+  const pairs = [['#term-chat', all.chat], ['#term-system', all.system], ['#term-alerts', all.err], ['#term-head-total', all.total], ['#term-head-chat', all.chat], ['#term-head-alerts', all.err]];
+  pairs.forEach(([sel, val]) => { const el = $(sel); if (el) el.textContent = val.toLocaleString(); });
+  if (!state.termPaused) box.scrollTop = box.scrollHeight;
+}
+
+function appendTerminalLine(payload) {
+  state.terminalLogs.push(payload);
+  if (state.terminalLogs.length > 1200) state.terminalLogs.splice(0, state.terminalLogs.length - 1200);
+  const box = $('#term-lines');
+  if (!box) return;
+  const item = { id: payload.id, name: payload.name, entry: payload.entry };
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  if (termMatches(item) && !state.termPaused) {
+    box.insertAdjacentHTML('beforeend', terminalLineHtml(item));
+    if (box.children.length > 800) box.firstElementChild.remove();
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+  const count = $('#term-count');
+  if (count) count.textContent = termFiltered().length.toLocaleString();
+  const all = termCounts();
+  const pairs = [['#term-chat', all.chat], ['#term-system', all.system], ['#term-alerts', all.err], ['#term-head-total', all.total], ['#term-head-chat', all.chat], ['#term-head-alerts', all.err]];
+  pairs.forEach(([sel, val]) => { const el = $(sel); if (el) el.textContent = val.toLocaleString(); });
+  const lastEl = $('#term-head-last');
+  if (lastEl) lastEl.textContent = fmtRelative(payload.entry.t);
+}
+
+function terminalTargetOptions() {
+  const bots = state.bots.slice().sort((a, b) => (a.status === b.status ? a.name.localeCompare(b.name) : (a.status === 'online' ? -1 : 1)));
+  if (!bots.length) return '<option value="">No bots yet</option>';
+  return bots.map((b) => `<option value="${esc(b.id)}" ${state.termTarget === b.id ? 'selected' : ''}>${esc(b.name)}${b.status === 'online' ? '' : ` — ${b.status}`}</option>`).join('');
+}
+
+function terminalHtml() {
+  const c = termCounts();
+  const online = state.bots.filter((b) => b.status === 'online');
+  const last = state.terminalLogs.length ? state.terminalLogs[state.terminalLogs.length - 1].entry : null;
+  const fleet = state.bots.slice().sort((a, b) => (a.status === b.status ? a.name.localeCompare(b.name) : (a.status === 'online' ? -1 : 1)));
+  return `
+    <div class="term-page">
+      <div class="term-head">
+        <div>
+          <span class="term-live"><i></i> live terminal</span>
+          <h2>One terminal.<br />Every bot.</h2>
+          <p>Merged chat, logins, switches and errors from ${state.bots.length} bots — searchable, filterable and commandable.</p>
+        </div>
+        <div class="term-statrow">
+          <div><b id="term-head-online">${online.length}</b><span>online</span></div>
+          <div><b id="term-head-total">${c.total.toLocaleString()}</b><span>lines</span></div>
+          <div><b id="term-head-chat">${c.chat.toLocaleString()}</b><span>chat</span></div>
+          <div><b id="term-head-alerts">${c.err.toLocaleString()}</b><span>alerts</span></div>
+          <div><b id="term-head-last">${last ? fmtRelative(last.t) : '—'}</b><span>last event</span></div>
+        </div>
+      </div>
+
+      <div class="term-toolbar">
+        <select id="term-target" class="term-select" aria-label="Terminal target">
+          ${terminalTargetOptions()}
+        </select>
+        <label class="stream-search">
+          ${icon('search')}
+          <input id="terminal-search" type="search" placeholder="Search this terminal…" value="${esc(state.termQuery)}" autocomplete="off" />
+        </label>
+        <div class="chips" role="tablist" aria-label="Terminal filter">
+          <button class="chip ${state.termFilter === 'all' ? 'is-active' : ''}" data-term-filter="all">All</button>
+          <button class="chip ${state.termFilter === 'chat' ? 'is-active' : ''}" data-term-filter="chat">Chat</button>
+          <button class="chip ${state.termFilter === 'system' ? 'is-active' : ''}" data-term-filter="system">System</button>
+          <button class="chip ${state.termFilter === 'errors' ? 'is-active' : ''}" data-term-filter="errors">Alerts</button>
+        </div>
+        <div class="term-actions">
+          <button class="btn btn-ghost btn-sm ${state.termPaused ? 'is-on' : ''}" id="term-pause" type="button" title="${state.termPaused ? 'Resume auto-scroll' : 'Pause auto-scroll'}">${icon(state.termPaused ? 'play' : 'pause')}<span>${state.termPaused ? 'Paused' : 'Pause'}</span></button>
+          <button class="btn btn-ghost btn-sm" id="term-export" type="button" title="Export lines as .txt">${icon('download')}<span class="hide-sm">Export</span></button>
+          <button class="btn btn-ghost btn-sm" id="term-clear" type="button" title="Clear the view">${icon('trash')}<span class="hide-sm">Clear</span></button>
+        </div>
+      </div>
+
+      <div class="term-shell">
+        <div class="term-main">
+          <div class="term-lines" id="term-lines"></div>
+          <button class="term-jump" id="term-jump" type="button" hidden>${icon('arrow')} Jump to latest</button>
+        </div>
+        <aside class="term-side">
+          <div class="term-card">
+            <p class="term-side__title">Fleet</p>
+            <div class="term-fleet">
+              ${fleet.map((b) => `
+                <button type="button" class="term-bot ${state.termTarget === b.id ? 'is-active' : ''}" data-term-bot="${esc(b.id)}">
+                  <span class="term-bot__dot"></span>
+                  <span class="term-bot__name">${esc(b.name)}</span>
+                  <em>${b.status === 'online' ? `${b.ping || 0} ms` : b.status}</em>
+                </button>`).join('') || '<span class="term-none">No bots yet.</span>'}
+            </div>
+          </div>
+          <div class="term-card">
+            <p class="term-side__title">Quick commands</p>
+            <div class="term-quick">
+              ${['/afk', '/login Sandun123', '/spawn', '/home', '/warp crates', '/list'].map((cmd) => `<button type="button" class="cmd-preset" data-term-cmd="${esc(cmd)}">${esc(cmd)}</button>`).join('')}
+            </div>
+          </div>
+          <div class="term-card">
+            <p class="term-side__title">Session</p>
+            <div class="term-session">
+              <div><span>Lines</span><b id="term-count">${c.total.toLocaleString()}</b></div>
+              <div><span>Chat</span><b id="term-chat">${c.chat.toLocaleString()}</b></div>
+              <div><span>System</span><b id="term-system">${c.system.toLocaleString()}</b></div>
+              <div><span>Alerts</span><b id="term-alerts">${c.err.toLocaleString()}</b></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <form class="term-composer" id="term-form" autocomplete="off">
+        <select id="term-send-target" class="term-select" aria-label="Send to">
+          <option value="all">Send to all online bots</option>
+          ${state.bots.map((b) => `<option value="${esc(b.id)}">${esc(b.name)}${b.status === 'online' ? '' : ` — offline`}</option>`).join('')}
+        </select>
+        <input id="term-input" type="text" maxlength="250" placeholder="Type a message or /command…" aria-label="Terminal command" spellcheck="false" />
+        <button class="btn btn-primary" type="submit">${icon('send')}<span>Send</span></button>
+      </form>
+    </div>`;
+}
+
 /* ── rendering: view + chrome ───────────────────────────────────────────── */
 function loadingHtml() {
   return `
@@ -800,6 +1170,8 @@ function renderView() {
   if (state.view === 'servers') $('#view').innerHTML = serversHtml();
   else if (state.view === 'groups') $('#view').innerHTML = groupsHtml();
   else if (state.view === 'activity') $('#view').innerHTML = activityHtml();
+  else if (state.view === 'terminal') { $('#view').innerHTML = terminalHtml(); renderTerminalLines(); }
+  else if (state.view === 'bot') $('#view').innerHTML = botPageHtml(state.botId);
   else $('#view').innerHTML = dashboardHtml();
   updateUptimes();
 }
@@ -1002,6 +1374,7 @@ function onBot(bot) {
     scheduleViewRender();
   }
   if (state.consoleId === bot.id) updateDrawer(bot);
+  if (state.view === 'bot' && state.botId === bot.id) scheduleViewRender();
   renderSidebar();
 }
 
@@ -1056,6 +1429,8 @@ function onLog(payload) {
   if (lastEl) { lastEl.textContent = entry.text; lastEl.title = entry.text; }
 
   pushActivity(id, entry);
+  if (state.view === 'terminal') appendTerminalLine({ id, name: (bot || {}).name || 'Bot', entry });
+  else if (state.termLoaded) state.terminalLogs.push({ id, name: (bot || {}).name || 'Bot', entry });
   if (state.view === 'activity') scheduleActivityFeedRender();
   else if (state.view === 'dashboard') scheduleActivityPreviewRender();
   if (state.view !== 'activity') {
@@ -1063,6 +1438,7 @@ function onLog(payload) {
     updateActivityDot();
   }
   if (state.consoleId === id) appendConsoleLine(entry);
+  if (state.view === 'bot' && state.botId === id) appendBotRecent(entry);
 }
 
 function onRemoved(id) {
@@ -1279,6 +1655,7 @@ function switchView(view) {
   }
   state.view = view;
   if (view === 'activity') state.unread = false;
+  if (view === 'terminal') loadTerminal().catch(() => {});
   updateChrome();
   renderView();
   updateActivityDot();
