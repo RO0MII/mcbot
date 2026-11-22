@@ -726,9 +726,9 @@ function activityHtml() {
         <input id="activity-search" type="search" placeholder="Search messages, bots or servers…" aria-label="Search activity" value="${esc(state.activityQuery)}" autocomplete="off" />
       </label>
       <div class="chips" role="tablist" aria-label="Filter activity">
-        <button class="chip ${state.activityFilter === 'all' ? 'is-active' : ''}" data-afilter="all">All <em>${state.activity.length}</em></button>
-        <button class="chip ${state.activityFilter === 'chat' ? 'is-active' : ''}" data-afilter="chat">Chat <em>${chatCount}</em></button>
-        <button class="chip ${state.activityFilter === 'system' ? 'is-active' : ''}" data-afilter="system">System <em>${systemCount}</em></button>
+        <button class="chip ${state.activityFilter === 'all' ? 'is-active' : ''}" data-afilter="all">All <em id="act-count-all">${state.activity.length}</em></button>
+        <button class="chip ${state.activityFilter === 'chat' ? 'is-active' : ''}" data-afilter="chat">Chat <em id="act-count-chat">${chatCount}</em></button>
+        <button class="chip ${state.activityFilter === 'system' ? 'is-active' : ''}" data-afilter="system">System <em id="act-count-system">${systemCount}</em></button>
       </div>
       <span class="stream-count" id="activity-count">${items.length} events</span>
     </div>
@@ -1055,6 +1055,13 @@ function scheduleActivityFeedRender() {
     el.innerHTML = streamListHtml(items);
     const count = $('#activity-count');
     if (count) count.textContent = `${items.length} events`;
+    const chatCount = state.activity.filter((i) => ['chat', 'sent'].includes(i.entry.kind)).length;
+    const allCount = $('#act-count-all');
+    const chatEl = $('#act-count-chat');
+    const systemEl = $('#act-count-system');
+    if (allCount) allCount.textContent = state.activity.length;
+    if (chatEl) chatEl.textContent = chatCount;
+    if (systemEl) systemEl.textContent = state.activity.length - chatCount;
   }, 160);
 }
 
