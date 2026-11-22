@@ -9,31 +9,47 @@ let inventoryTimer = null;
 
 function drawerStatusHtml(bot) {
   const st = statusMeta(bot);
+  const login = bot.loggedIn ? 'Verified' : (bot.autoLogin ? 'Auto' : 'Off');
   return `
-    <span>State <b class="${st.dot === 'online' ? 'good' : ''}">${st.label}</b></span>
-    <span>Uptime <b data-uptime="${bot.joinedAt || ''}">${bot.joinedAt ? fmtDuration(nowMs() - bot.joinedAt) : '—'}</b></span>
-    <span>Login <b class="${bot.loggedIn ? 'good' : ''}">${bot.loggedIn ? 'Verified' : (bot.autoLogin ? 'Auto' : 'Off')}</b></span>
-    <span>Players <b>${bot.status === 'online' ? (bot.players || 0) : '—'}</b></span>`;
+    <div class="dstat ${st.dot === 'online' ? 'is-good' : ''}">
+      <span>${icon('activity')} State</span><b>${st.label}</b>
+    </div>
+    <div class="dstat">
+      <span>${icon('clock')} Uptime</span><b data-uptime="${bot.joinedAt || ''}">${bot.joinedAt ? fmtDuration(nowMs() - bot.joinedAt) : '—'}</b>
+    </div>
+    <div class="dstat ${bot.loggedIn ? 'is-good' : ''}">
+      <span>${icon('shield')} Login</span><b>${login}</b>
+    </div>
+    <div class="dstat">
+      <span>${icon('users')} Players</span><b>${bot.status === 'online' ? (bot.players || 0) : '—'}</b>
+    </div>`;
 }
 
 function drawerTabsHtml(bot) {
   return `
     <div class="drawer__tabs" role="tablist" aria-label="Bot panel">
       <button class="drawer__tab ${drawerTab === 'console' ? 'is-active' : ''}" type="button" role="tab"
-        aria-selected="${drawerTab === 'console'}" data-drawer-tab="console">${icon('terminal')} Console</button>
+        aria-selected="${drawerTab === 'console'}" data-drawer-tab="console"><span class="drawer__tab-ico">${icon('terminal')}</span><span>Console</span></button>
       <button class="drawer__tab ${drawerTab === 'inventory' ? 'is-active' : ''}" type="button" role="tab"
-        aria-selected="${drawerTab === 'inventory'}" data-drawer-tab="inventory">${icon('chest')} Inventory
+        aria-selected="${drawerTab === 'inventory'}" data-drawer-tab="inventory"><span class="drawer__tab-ico">${icon('chest')}</span><span>Inventory</span>
         <em id="inv-tab-count">${bot.inventoryUsed || 0}</em></button>
       <button class="drawer__tab ${drawerTab === 'player' ? 'is-active' : ''}" type="button" role="tab"
-        aria-selected="${drawerTab === 'player'}" data-drawer-tab="player">${icon('user')} Player</button>
+        aria-selected="${drawerTab === 'player'}" data-drawer-tab="player"><span class="drawer__tab-ico">${icon('user')}</span><span>Player</span></button>
     </div>`;
 }
 
-function lineHtml(entry) {
-  return `<div class="console__line kind-${esc(entry.kind || 'chat')}">
+function consoleLineHtml(entry) {
+  const kind = entry.kind || 'chat';
+  const system = !['chat', 'sent'].includes(kind);
+  return `<span class="console__rail"></span>
     <span class="console__time">${fmtClock(entry.t)}</span>
-    <span class="console__text">${esc(entry.text)}</span>
-  </div>`;
+    ${system ? `<span class="console__icon">${icon(kindIcon(kind))}</span>` : ''}
+    <span class="console__text">${esc(entry.text)}</span>`;
+}
+function lineHtml(entry) {
+  const kind = entry.kind || 'chat';
+  const system = !['chat', 'sent'].includes(kind);
+  return `<div class="console__line kind-${esc(kind)} ${system ? 'is-system' : ''}">${consoleLineHtml(entry)}</div>`;
 }
 
 function renderDrawer(bot) {
@@ -41,13 +57,16 @@ function renderDrawer(bot) {
   if (!drawer) return;
   const st = statusMeta(bot);
   drawer.innerHTML = `
-    <div class="drawer__head">
+    <div class="drawer__head" style="--hue:${hashHue(bot.name)}">
       <div class="bot-avatar" id="drawer-avatar" style="--hue:${hashHue(bot.name)}"><span class="avatar-initial">${esc(initial(bot.name))}</span>${skinHeadHtml(bot.name)}<span class="status-dot ${st.dot}"></span></div>
       <div class="drawer__title">
         <h2 id="drawer-name">${esc(bot.name)} <span class="pill ${st.pill}"><i></i>${st.label}</span></h2>
-        <p id="drawer-host">${esc(bot.host)}:${bot.port} · v${esc(bot.version)}</p>
+        <p id="drawer-host"><i class="server-dot"></i>${esc(bot.host)}:${bot.port} <span>· v${esc(bot.version)}</span></p>
       </div>
-      <button class="icon-btn" type="button" data-action="close-console" aria-label="Close panel">${icon('x')}</button>
+      <div class="drawer__head-actions">
+        <span class="drawer__session"><i></i> session</span>
+        <button class="icon-btn" type="button" data-action="close-console" aria-label="Close panel">${icon('x')}</button>
+      </div>
     </div>
     <div class="drawer__status" id="drawer-status">${drawerStatusHtml(bot)}</div>
     ${drawerTabsHtml(bot)}
@@ -59,7 +78,7 @@ function renderDrawer(bot) {
         <div class="quick-chips">
           <button class="quick-chip quick-chip--accent" type="button" data-action="console-login">${icon('shield')} /login</button>
           <button class="quick-chip" type="button" data-action="console-afk">${icon('clock')} /afk</button>
-          <button class="quick-chip ${bot.autoEat ? 'is-on' : ''}" type="button" id="auto-eat-chip" data-action="console-autoeat">${icon('food')} Auto-eat ${bot.autoEat ? 'on' : 'off'}</button>
+          <button class="quick-chip ${bot.autoEat ? 'is-on' : ''}" type="button" id="auto-eat-chip" data-action="console-autoeat"><i class="quick-chip__dot"></i>${icon('food')} Auto-eat ${bot.autoEat ? 'on' : 'off'}</button>
           <button class="quick-chip" type="button" data-action="console-switch">${icon('server')} Switch server</button>
           <button class="quick-chip" type="button" data-action="console-restart">${icon('restart')} Restart</button>
           <button class="quick-chip" type="button" data-action="console-stop">${icon('stop')} Stop bot</button>
@@ -101,7 +120,7 @@ function updateDrawer(bot) {
   const name = $('#drawer-name');
   if (name) name.innerHTML = `${esc(bot.name)} <span class="pill ${st.pill}"><i></i>${st.label}</span>`;
   const host = $('#drawer-host');
-  if (host) host.textContent = `${bot.host}:${bot.port} · v${bot.version}`;
+  if (host) host.innerHTML = `<i class="server-dot"></i>${esc(bot.host)}:${bot.port} <span>· v${esc(bot.version)}</span>`;
   const status = $('#drawer-status');
   if (status) status.innerHTML = drawerStatusHtml(bot);
   const count = $('#inv-tab-count');
@@ -109,7 +128,7 @@ function updateDrawer(bot) {
   const ae = $('#auto-eat-chip');
   if (ae) {
     ae.classList.toggle('is-on', !!bot.autoEat);
-    ae.innerHTML = `${icon('food')} Auto-eat ${bot.autoEat ? 'on' : 'off'}`;
+    ae.innerHTML = `<i class="quick-chip__dot"></i>${icon('food')} Auto-eat ${bot.autoEat ? 'on' : 'off'}`;
   }
   if (drawerTab === 'inventory' && !$('#inventory-root')?.children.length) loadInventory(bot.id);
   if (drawerTab === 'player' && $('#player-root') && (Date.now() - lastPlayerRender) > 1200) renderPlayer(bot);
@@ -121,7 +140,7 @@ function renderConsoleLines(id) {
   if (!lines) return;
   const logs = state.logs.get(id) || [];
   if (!logs.length) {
-    lines.innerHTML = `<div class="console__empty">${icon('terminal')}No messages yet — say hello or run a command.</div>`;
+    lines.innerHTML = `<div class="console__empty"><span class="console__empty-ico">${icon('terminal')}</span><b>Console is quiet</b><span>Say hello or run a command below.</span></div>`;
     return;
   }
   lines.innerHTML = logs.map(lineHtml).join('');
@@ -136,9 +155,11 @@ function appendConsoleLine(entry) {
   const nearBottom = body ? (body.scrollHeight - body.scrollTop - body.clientHeight < 100) : true;
   const empty = lines.querySelector('.console__empty');
   if (empty) lines.innerHTML = '';
+  const kind = entry.kind || 'chat';
+  const system = !['chat', 'sent'].includes(kind);
   const div = document.createElement('div');
-  div.className = `console__line kind-${entry.kind || 'chat'}`;
-  div.innerHTML = `<span class="console__time">${fmtClock(entry.t)}</span><span class="console__text">${esc(entry.text)}</span>`;
+  div.className = `console__line kind-${kind} ${system ? 'is-system' : ''}`;
+  div.innerHTML = consoleLineHtml(entry);
   lines.appendChild(div);
   while (lines.children.length > 500) lines.firstElementChild.remove();
   if (nearBottom && body) body.scrollTop = body.scrollHeight;
