@@ -536,6 +536,7 @@ function dashboardHtml() {
   return `
     ${fleetHtml(title, sub)}
     ${serverPulseHtml()}
+    ${dashScoreHtml()}
     <div class="section-head">
       <div class="section-head__title">
         <h3>Your bots</h3>
@@ -837,6 +838,7 @@ async function openBotPage(id, push = true) {
   if (sub) sub.textContent = `${bot.host}:${bot.port} · ${statusMeta(bot).label}`;
   if (push) history.pushState({}, '', `#/bot/${id}`);
   if (window.innerWidth <= 1080) window.scrollTo({ top: 0, behavior: 'smooth' });
+  bindTilt($('.botpage__hero'), 3.2);
   try {
     const data = await api(`/api/bots/${id}/logs`);
     state.logs.set(id, Array.isArray(data.logs) ? data.logs : []);
@@ -845,10 +847,10 @@ async function openBotPage(id, push = true) {
   loadBotInventory(id, true);
 }
 
-function bpMetric(iconName, label, value, sub = '', tone = '') {
+function bpMetric(iconName, label, value, sub = '', tone = '', id = '') {
   return `<div class="bpmetric ${tone}">
     <span>${icon(iconName)} ${esc(label)}</span>
-    <b>${esc(value)}</b>
+    <b ${id ? `id="${id}"` : ''}>${esc(value)}</b>
     ${sub ? `<em>${esc(sub)}</em>` : ''}
   </div>`;
 }
@@ -914,14 +916,15 @@ function sparkline(values) {
   return `<svg class="bpspark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts}"/></svg>`;
 }
 
-function bpScoreHtml(bot) {
+function bpScoreHtml(bot, opts = {}) {
   const sb = bot.scoreboard;
   if (!sb || !Array.isArray(sb.items) || !sb.items.length) {
     return `<div class="bp-empty">${icon('activity')}No sidebar scoreboard from this server right now.</div>`;
   }
-  const items = sb.items;
+  const allItems = sb.items;
+  const items = opts.limit ? allItems.slice(0, opts.limit) : allItems;
   const max = Math.max(...items.map((it) => (it.amount != null ? Math.abs(Number(it.amount) || 0) : 0)), 1);
-  const selfIdx = items.findIndex((it) => String(it.label || '').toLowerCase().includes(bot.name.toLowerCase()));
+  const selfIdx = allItems.findIndex((it) => String(it.label || '').toLowerCase().includes(bot.name.toLowerCase()));
   const hist = (scoreHistory.get(bot.id) || []).map((x) => x.v);
   const delta = hist.length > 1 ? hist[hist.length - 1] - hist[hist.length - 2] : 0;
   return `<div class="bpscore">
@@ -929,12 +932,12 @@ function bpScoreHtml(bot) {
       <div><span class="bpscore__eyebrow"><i></i> live tracker</span><h4>${esc(sb.title || 'Scoreboard')}</h4></div>
       <span class="bpscore__meta">${items.length} lines</span>
     </div>
-    <div class="bpscore__rows">
+    <div class="bpscore__rows" id="bp-score-rows">
       ${items.map((it, i) => {
         const self = i === selfIdx;
         const pct = it.amount == null ? 0 : Math.max(2, Math.min(100, (Math.abs(it.amount) / max) * 100));
         const shown = it.amountText || (it.amount == null ? '—' : fmtNum(it.amount));
-        return `<div class="bpscore__row ${self ? 'is-self' : ''}">
+        return `<div class="bpscore__row ${self ? 'is-self' : ''}" style="--i:${i}">
           <span class="bpscore__rank ${i < 3 ? 'is-podium' : ''}">${i + 1}</span>
           <span class="bpscore__label">${esc(it.nameLabel || it.label)}</span>
           <span class="bpscore__bar"><i style="width:${pct}%"></i></span>
@@ -943,7 +946,7 @@ function bpScoreHtml(bot) {
         </div>`;
       }).join('')}
     </div>
-    ${selfIdx >= 0 ? `<div class="bpscore__foot">
+    ${selfIdx >= 0 ? `<div class="bpscore__foot" id="bp-score-foot">
       <div><span>your line</span><b>${esc(items[selfIdx].amountText || (items[selfIdx].amount == null ? '—' : fmtNum(items[selfIdx].amount)))}</b></div>
       ${sparkline(hist)}
       <span class="bpscore__foot-note">${hist.length > 1 ? `${hist.length} samples` : 'collecting…'}</span>
@@ -1000,6 +1003,107 @@ function renderBotInventory() {
   </div>`;
 }
 
+const bpPatch = { invSig: '', scoreSig: '', dashBot: null };
+
+function bindTilt(el, max = 3) {
+  if (!el || el.dataset.tiltBound) return;
+  el.dataset.tiltBound = '1';
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  el.addEventListener('pointermove', (e) => {
+    const r = el.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width - 0.5;
+    const y = (e.clientY - r.top) / r.height - 0.5;
+    el.style.transform = `perspective(1100px) rotateX(${(-y * max).toFixed(2)}deg) rotateY(${(x * max).toFixed(2)}deg)`;
+  });
+  el.addEventListener('pointerleave', () => { el.style.transform = ''; });
+}
+
+function effectsText(d) {
+  const fx = Array.isArray(d.effects) ? d.effects : [];
+  return fx.length ? fx.map((e) => `${e.name ? esc(prettyGameId(e.name)) : 'Effect'}${e.amplifier ? ` ${roman(e.amplifier + 1)}` : ''}`).join(', ') : 'None';
+}
+
+function patchBotPage(bot) {
+  const d = bot.detail || {};
+  const st = statusMeta(bot);
+  const set = (sel, html) => { const el = $(sel); if (el) el.innerHTML = html; };
+  const setText = (sel, text) => { const el = $(sel); if (el) el.textContent = text; };
+  const hp = Number.isFinite(bot.health) ? Math.max(0, Math.min(20, bot.health)) : 0;
+  const food = Number.isFinite(bot.food) ? Math.max(0, Math.min(20, bot.food)) : 0;
+  const xp = d.xp || { level: 0, points: 0 };
+  setText('#bp-hp', `${hp}/20`);
+  setText('#bp-food', `${food}/20`);
+  setText('#bp-ping', bot.ping == null ? '—' : `${bot.ping} ms`);
+  setText('#bp-players', bot.players == null ? '—' : bot.players);
+  setText('#bp-xp', xp.level || 0);
+  const hpCard = $('#bp-hp') && $('#bp-hp').closest('.bpmetric');
+  if (hpCard) { hpCard.classList.toggle('is-bad', hp <= 6); hpCard.classList.toggle('is-warn', false); }
+  const foodCard = $('#bp-food') && $('#bp-food').closest('.bpmetric');
+  if (foodCard) { foodCard.classList.toggle('is-warn', food <= 6); foodCard.classList.toggle('is-bad', false); }
+  const pos = bot.position ? `${bot.position.x} ${bot.position.y} ${bot.position.z}` : '—';
+  setText('#bp-pos', pos);
+  setText('#bp-dim', prettyGameId(d.dimension));
+  setText('#bp-diff', d.difficulty ? String(d.difficulty).charAt(0).toUpperCase() + String(d.difficulty).slice(1) : '—');
+  setText('#bp-brand', d.serverBrand || '—');
+  setText('#bp-effects', effectsText(d));
+  const pill = $('#bp-pill');
+  if (pill) { pill.className = `pill ${st.pill}`; pill.innerHTML = `<i></i>${st.label}`; }
+  const dot = $('#bp-dot');
+  if (dot) dot.className = `status-dot ${st.dot}`;
+  setText('#bp-ae', bot.autoEat ? 'On' : 'Off');
+  setText('#bp-afk', bot.antiAfk ? 'On' : 'Off');
+  setText('#bp-reconnect', bot.autoReconnect ? 'On' : 'Off');
+  setText('#bp-autologin', bot.autoLogin ? 'On' : 'Off');
+  setText('#bp-attempts', `${bot.loginAttempts || 0}/5`);
+  patchBotScore(bot);
+  const sig = (bot.inventoryUsed || 0) + ':' + (bot.inventoryPreview || []).map((i) => `${i.name}:${i.count}`).join(',');
+  if (sig !== bpPatch.invSig) { bpPatch.invSig = sig; renderBotInventory(); }
+}
+
+function patchBotScore(bot) {
+  const root = $('#bp-score-root');
+  if (!root) return;
+  const sb = bot.scoreboard;
+  const sig = sb && Array.isArray(sb.items) ? sb.items.map((i) => `${i.name}:${i.value}:${i.amountText || ''}`).join('|') : '';
+  if (sig !== bpPatch.scoreSig) {
+    bpPatch.scoreSig = sig;
+    root.innerHTML = bpScoreHtml(bot);
+    return;
+  }
+  if (!sb || !Array.isArray(sb.items)) return;
+  const max = Math.max(...sb.items.map((it) => (it.amount != null ? Math.abs(Number(it.amount) || 0) : 0)), 1);
+  const rows = root.querySelectorAll('.bpscore__row');
+  sb.items.forEach((it, i) => {
+    const row = rows[i];
+    if (!row) return;
+    const self = String(it.label || '').toLowerCase().includes(bot.name.toLowerCase());
+    row.classList.toggle('is-self', self);
+    const pct = it.amount == null ? 0 : Math.max(2, Math.min(100, (Math.abs(it.amount) / max) * 100));
+    const bar = row.querySelector('.bpscore__bar i');
+    if (bar) bar.style.width = `${pct}%`;
+    const val = row.querySelector('b');
+    if (val) val.textContent = it.amountText || (it.amount == null ? '—' : fmtNum(it.amount));
+    const label = row.querySelector('.bpscore__label');
+    if (label) label.textContent = it.nameLabel || it.label;
+  });
+}
+
+function dashScoreHtml() {
+  const bot = state.bots.find((b) => b.status === 'online' && b.scoreboard && b.scoreboard.items && b.scoreboard.items.length);
+  if (!bot) return '';
+  bpPatch.dashBot = bot.id;
+  return `<section class="bpanel bpanel--wide dash-score" data-reveal="dash-score">
+    <header class="bpanel__head"><h3>Scoreboard tracker</h3><span class="bpanel__count">${esc(bot.name)} · live</span><button class="bpanel__link" type="button" data-action="bot-page" data-id="${esc(bot.id)}">Open bot page ${icon('arrow')}</button></header>
+    <div id="dash-score-root">${bpScoreHtml(bot, { limit: 6 })}</div>
+  </section>`;
+}
+
+function updateDashScore(bot) {
+  if (!bot || bpPatch.dashBot !== bot.id) return;
+  const root = $('#dash-score-root');
+  if (root) root.innerHTML = bpScoreHtml(bot, { limit: 6 });
+}
+
 function botPageHtml(id) {
   const bot = findBot(id) || state.bots[0];
   if (!bot) {
@@ -1019,10 +1123,10 @@ function botPageHtml(id) {
       <button class="botpage__back" type="button" data-view="dashboard">${icon('arrow')} Back to fleet</button>
 
       <header class="botpage__hero" data-reveal="bp-hero">
-        <div class="botpage__avatar"><span class="avatar-initial">${esc(initial(bot.name))}</span><img class="botpage__skin" src="${skinUrl(bot.name, 'body', 200)}" alt="" loading="lazy" decoding="async" data-skin="1" /><span class="status-dot ${st.dot}"></span></div>
+        <div class="botpage__avatar"><span class="avatar-initial">${esc(initial(bot.name))}</span><img class="botpage__skin" src="${skinUrl(bot.name, 'body', 200)}" alt="" loading="lazy" decoding="async" data-skin="1" /><span class="status-dot ${st.dot}" id="bp-dot"></span></div>
         <div class="botpage__id">
           <span class="botpage__eyebrow">bot profile</span>
-          <h2>${esc(bot.name)} <span class="pill ${st.pill}"><i></i>${st.label}</span></h2>
+          <h2>${esc(bot.name)} <span class="pill ${st.pill}" id="bp-pill"><i></i>${st.label}</span></h2>
           <p><i class="server-dot"></i>${esc(bot.host)}:${bot.port} <span>· v${esc(bot.version)}</span></p>
           <div class="player-tags">
             <span class="ptag">${icon('cube')} ${esc(prettyGameId(d.gamemode))}</span>
@@ -1039,12 +1143,12 @@ function botPageHtml(id) {
       </header>
 
       <div class="botpage__stats" data-reveal="bp-stats" style="--d:60ms">
-        ${bpMetric('heart', 'Health', `${hp}/20`, 'hitpoints', hp <= 6 ? 'is-bad' : '')}
-        ${bpMetric('food', 'Food', `${food}/20`, 'hunger', food <= 6 ? 'is-warn' : '')}
-        ${bpMetric('activity', 'Ping', bot.ping == null ? '—' : `${bot.ping} ms`, 'latency')}
-        ${bpMetric('users', 'Players', bot.players == null ? '—' : bot.players, 'on this server')}
-        ${bpMetric('clock', 'Uptime', bot.joinedAt ? fmtDuration(nowMs() - bot.joinedAt) : '—', 'this session')}
-        ${bpMetric('zap', 'XP level', xp.level || 0, `${xp.points || 0} points`)}
+        ${bpMetric('heart', 'Health', `${hp}/20`, 'hitpoints', hp <= 6 ? 'is-bad' : '', 'bp-hp')}
+        ${bpMetric('food', 'Food', `${food}/20`, 'hunger', food <= 6 ? 'is-warn' : '', 'bp-food')}
+        ${bpMetric('activity', 'Ping', bot.ping == null ? '—' : `${bot.ping} ms`, 'latency', '', 'bp-ping')}
+        ${bpMetric('users', 'Players', bot.players == null ? '—' : bot.players, 'on this server', '', 'bp-players')}
+        ${bpMetric('clock', 'Uptime', bot.joinedAt ? fmtDuration(nowMs() - bot.joinedAt) : '—', 'this session', '', 'bp-uptime')}
+        ${bpMetric('zap', 'XP level', xp.level || 0, `${xp.points || 0} points`, '', 'bp-xp')}
       </div>
 
       <nav class="bp-nav" aria-label="Bot sections">
@@ -1054,12 +1158,12 @@ function botPageHtml(id) {
       <section class="bpanel bpanel--wide" id="bp-player" data-reveal="bp-player" style="--d:100ms">
         <header class="bpanel__head"><h3>Player</h3><span class="bpanel__live"><i></i> live</span></header>
         <div class="bkv bkv--3">
-          <div><span>Position</span><b>${esc(pos)}</b></div>
-          <div><span>Dimension</span><b>${esc(prettyGameId(d.dimension))}</b></div>
-          <div><span>Difficulty</span><b>${esc(d.difficulty ? String(d.difficulty).charAt(0).toUpperCase() + String(d.difficulty).slice(1) : '—')}</b></div>
-          <div><span>Server brand</span><b>${esc(d.serverBrand || '—')}</b></div>
-          <div><span>UUID</span><b title="${esc(uuid)}">${uuid ? `${esc(uuid.slice(0, 8))}…${esc(uuid.slice(-4))}` : '—'}</b></div>
-          <div><span>Effects</span><b>${effects.length ? effects.map((e) => `${esc(prettyGameId(e.name))}${e.amplifier ? ` ${roman(e.amplifier + 1)}` : ''}`).join(', ') : 'None'}</b></div>
+          <div><span>Position</span><b id="bp-pos">${esc(pos)}</b></div>
+          <div><span>Dimension</span><b id="bp-dim">${esc(prettyGameId(d.dimension))}</b></div>
+          <div><span>Difficulty</span><b id="bp-diff">${esc(d.difficulty ? String(d.difficulty).charAt(0).toUpperCase() + String(d.difficulty).slice(1) : '—')}</b></div>
+          <div><span>Server brand</span><b id="bp-brand">${esc(d.serverBrand || '—')}</b></div>
+          <div><span>UUID</span><b id="bp-uuid" title="${esc(uuid)}">${uuid ? `${esc(uuid.slice(0, 8))}…${esc(uuid.slice(-4))}` : '—'}</b></div>
+          <div><span>Effects</span><b id="bp-effects">${effects.length ? effects.map((e) => `${esc(prettyGameId(e.name))}${e.amplifier ? ` ${roman(e.amplifier + 1)}` : ''}`).join(', ') : 'None'}</b></div>
         </div>
         <p class="bpanel__sub">Equipped</p>
         <div class="player-gear">
@@ -1087,12 +1191,12 @@ function botPageHtml(id) {
       <section class="bpanel bpanel--wide" id="bp-session" data-reveal="bp-session" style="--d:260ms">
         <header class="bpanel__head"><h3>Session</h3><span class="bpanel__live"><i></i> ${st.label}</span></header>
         <div class="bkv bkv--3">
-          <div><span>Auto-eat</span><b>${bot.autoEat ? 'On' : 'Off'}</b></div>
-          <div><span>Anti-AFK</span><b>${bot.antiAfk ? 'On' : 'Off'}</b></div>
-          <div><span>Auto-reconnect</span><b>${bot.autoReconnect ? 'On' : 'Off'}</b></div>
-          <div><span>Auto-login</span><b>${bot.autoLogin ? 'On' : 'Off'}</b></div>
-          <div><span>Login attempts</span><b>${bot.loginAttempts || 0}/5</b></div>
-          <div><span>Version</span><b>${esc(bot.version)}</b></div>
+          <div><span>Auto-eat</span><b id="bp-ae">${bot.autoEat ? 'On' : 'Off'}</b></div>
+          <div><span>Anti-AFK</span><b id="bp-afk">${bot.antiAfk ? 'On' : 'Off'}</b></div>
+          <div><span>Auto-reconnect</span><b id="bp-reconnect">${bot.autoReconnect ? 'On' : 'Off'}</b></div>
+          <div><span>Auto-login</span><b id="bp-autologin">${bot.autoLogin ? 'On' : 'Off'}</b></div>
+          <div><span>Login attempts</span><b id="bp-attempts">${bot.loginAttempts || 0}/5</b></div>
+          <div><span>Version</span><b id="bp-ver">${esc(bot.version)}</b></div>
         </div>
       </section>
 
@@ -1326,8 +1430,10 @@ function renderView() {
     $('#view').innerHTML = botPageHtml(state.botId);
     renderBotConsole(state.botId);
     renderBotInventory();
+    bindTilt($('.botpage__hero'), 3.2);
   }
   else $('#view').innerHTML = dashboardHtml();
+  if (state.view === 'dashboard') bindTilt($('.fleet__deck'), 2.4);
   updateUptimes();
   initReveals($('#view'));
 }
@@ -1531,7 +1637,8 @@ function onBot(bot) {
     scheduleViewRender();
   }
   if (state.consoleId === bot.id) updateDrawer(bot);
-  if (state.view === 'bot' && state.botId === bot.id) scheduleViewRender();
+  if (state.view === 'bot' && state.botId === bot.id) patchBotPage(bot);
+  if (state.view === 'dashboard') updateDashScore(bot);
   renderSidebar();
 }
 

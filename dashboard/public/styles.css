@@ -2232,3 +2232,23 @@ html.js [data-reveal].no-anim { transition: none; }
 /* keep the scoreboard calm on live re-renders */
 .bpscore__bar i { animation: none; }
 .bpspark polyline { animation: none; stroke-dashoffset: 0; }
+
+/* 3D depth layer */
+.fleet__deck { transform-style: preserve-3d; transition: transform .3s var(--ease); will-change: transform; }
+.botpage__hero { transform-style: preserve-3d; transition: transform .35s var(--ease); }
+.botpage__avatar { transform: translateZ(26px); }
+.botpage__id { transform: translateZ(14px); }
+.botpage__actions { transform: translateZ(18px); }
+.bot-grid { perspective: 1500px; }
+.bot-card { transform-style: preserve-3d; }
+.bot-card:hover { transform: translateY(-4px) rotateX(2.2deg); }
+.bpscore__row { animation: scoreRowIn .5s var(--ease) both; animation-delay: calc(var(--i, 0) * 45ms); transform-origin: top center; }
+@keyframes scoreRowIn {
+  from { opacity: 0; transform: perspective(700px) rotateX(-16deg) translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+.dash-score { margin-top: 12px; }
+@media (prefers-reduced-motion: reduce) {
+  .fleet__deck, .botpage__hero { transform: none !important; }
+  .bpscore__row { animation: none; }
+}
