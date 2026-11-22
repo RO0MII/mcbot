@@ -10,19 +10,15 @@ let inventoryTimer = null;
 function drawerStatusHtml(bot) {
   const st = statusMeta(bot);
   const login = bot.loggedIn ? 'Verified' : (bot.autoLogin ? 'Auto' : 'Off');
-  return `
-    <div class="dstat ${st.dot === 'online' ? 'is-good' : ''}">
-      <span>${icon('activity')} State</span><b>${st.label}</b>
-    </div>
-    <div class="dstat">
-      <span>${icon('clock')} Uptime</span><b data-uptime="${bot.joinedAt || ''}">${bot.joinedAt ? fmtDuration(nowMs() - bot.joinedAt) : '—'}</b>
-    </div>
-    <div class="dstat ${bot.loggedIn ? 'is-good' : ''}">
-      <span>${icon('shield')} Login</span><b>${login}</b>
-    </div>
-    <div class="dstat">
-      <span>${icon('users')} Players</span><b>${bot.status === 'online' ? (bot.players || 0) : '—'}</b>
-    </div>`;
+  return `<div class="drawer__statusline">
+    <span>State <b class="${st.dot === 'online' ? 'good' : ''}">${st.label}</b></span>
+    <i>·</i>
+    <span>Uptime <b data-uptime="${bot.joinedAt || ''}">${bot.joinedAt ? fmtDuration(nowMs() - bot.joinedAt) : '—'}</b></span>
+    <i>·</i>
+    <span>Login <b class="${bot.loggedIn ? 'good' : ''}">${login}</b></span>
+    <i>·</i>
+    <span>Players <b>${bot.status === 'online' ? (bot.players || 0) : '—'}</b></span>
+  </div>`;
 }
 
 function drawerTabsHtml(bot) {
@@ -105,6 +101,7 @@ function renderDrawer(bot) {
   } else if (drawerTab === 'player') {
     renderPlayer(bot);
   }
+  initReveals(drawer);
 }
 
 function updateDrawer(bot) {
@@ -196,11 +193,11 @@ function renderInventory(bot, inv) {
     ? `<span class="inv-held__slot">${slotHtml(held, bot.version)}</span><span class="inv-held__text">Held in hand<strong>${esc(held.displayName)}</strong></span>`
     : `<span class="inv-held__slot">${slotHtml(null, bot.version)}</span><span class="inv-held__text">Held in hand<strong>Empty</strong></span>`;
   root.innerHTML = `
-    <div class="inv-head">
+    <div class="inv-head" data-reveal="inv-head">
       <div class="inv-head__title">${icon('chest')} <span>Inventory</span><em>${inv.used}/36</em></div>
       <div class="inv-head__held">${heldHtml}</div>
     </div>
-    <div class="inv-panel">
+    <div class="inv-panel" data-reveal="inv-panel" style="--d:60ms">
       <div class="inv-top">
         <div class="inv-block">
           <p class="inv-label">Crafting <em>2×2</em></p>
@@ -239,6 +236,7 @@ function renderInventory(bot, inv) {
       </div>
     </div>
     <p class="inv-foot">${icon('activity')} ${inv.stale ? 'Syncing with the server… showing your last snapshot' : 'Live from the bot · updates automatically'}</p>`;
+  initReveals(root);
 }
 
 /* ── player profile (all in-game state) ─────────────────────────────────── */
@@ -291,7 +289,7 @@ function renderPlayer(bot) {
   const uuid = d.uuid ? String(d.uuid) : '';
 
   root.innerHTML = `
-    <div class="player-hero" style="--server:${serverHue};--hue:${hue}">
+    <div class="player-hero" data-reveal="pl-hero" style="--server:${serverHue};--hue:${hue}">
       <div class="player-hero__skin">
         <span class="player-hero__initial">${esc(initial(bot.name))}</span>
         <img src="${skinUrl(bot.name, 'body', 200)}" alt="" loading="lazy" decoding="async" data-skin="1" />
@@ -309,7 +307,7 @@ function renderPlayer(bot) {
       </div>
     </div>
 
-    <div class="player-block">
+    <div class="player-block" data-reveal="pl-vitals" style="--d:70ms">
       <p class="inv-label">Vitals</p>
       <div class="pmeters">
         ${playerMeter('Health', hp, 20, 'heart', 'is-hp')}
@@ -320,7 +318,7 @@ function renderPlayer(bot) {
       </div>
     </div>
 
-    <div class="player-block">
+    <div class="player-block" data-reveal="pl-world" style="--d:130ms">
       <p class="inv-label">World & connection</p>
       <div class="pstats">
         ${playerStat('cube', 'Gamemode', prettyGameId(d.gamemode))}
@@ -336,7 +334,7 @@ function renderPlayer(bot) {
       </div>
     </div>
 
-    <div class="player-block">
+    <div class="player-block" data-reveal="pl-gear" style="--d:190ms">
       <p class="inv-label">Equipped</p>
       <div class="player-gear">
         <div class="player-gear__slot"><span>Held</span>${slotHtml(bot.heldItem, bot.version)}</div>
@@ -345,7 +343,7 @@ function renderPlayer(bot) {
       </div>
     </div>
 
-    ${effects.length ? `<div class="player-block">
+    ${effects.length ? `<div class="player-block" data-reveal="pl-effects" style="--d:250ms">
       <p class="inv-label">Active effects <em>${effects.length}</em></p>
       <div class="player-effects">
         ${effects.map((e) => `<span class="peffect"><i></i>${esc(prettyGameId(e.name))}${e.amplifier ? ` ${roman(e.amplifier + 1)}` : ''}<em>${fmtEffectTime(e.duration)}</em></span>`).join('')}
@@ -353,6 +351,7 @@ function renderPlayer(bot) {
     </div>` : ''}
 
     <p class="inv-foot">${icon('activity')} Live player state · updates with every server tick</p>`;
+  initReveals(root);
 }
 
 async function loadInventory(id = state.consoleId) {
@@ -420,6 +419,7 @@ async function openConsole(id, tab = 'console') {
   const bot = findBot(id);
   if (!bot) return;
   state.consoleId = id;
+  revealState.clear();
   drawerTab = ['inventory', 'player'].includes(tab) ? tab : 'console';
   consoleHistory = [];
   consoleHistoryIndex = -1;

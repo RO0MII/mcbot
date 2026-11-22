@@ -326,8 +326,6 @@ function bindEvents() {
 
   const addBtn = $('#add-bot-btn');
   if (addBtn) addBtn.addEventListener('click', () => openBotModal());
-  const mobileAdd = $('#mobile-add');
-  if (mobileAdd) mobileAdd.addEventListener('click', () => openBotModal());
   const master = $('#master-toggle');
   if (master) master.addEventListener('click', toggleMaster);
   const topbarPower = $('#topbar-power');
@@ -357,7 +355,7 @@ function bindEvents() {
     const img = e.target;
     if (!img || img.tagName !== 'IMG' || img.dataset.skin !== '1') return;
     const prev = img.previousElementSibling;
-    if (prev && prev.classList && prev.classList.contains('player-hero__initial')) prev.style.display = 'none';
+    if (prev && prev.classList && (prev.classList.contains('player-hero__initial') || prev.classList.contains('avatar-initial'))) prev.style.display = 'none';
   }, true);
 
   // Item textures: the dashboard proxies and caches them; hide any that 404.

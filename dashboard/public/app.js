@@ -1,4 +1,5 @@
 'use strict';
+document.documentElement.classList.add('js');
 
 /* ══════════════════════════════════════════════════════════════════════════
    MCBot Control — core: helpers, state, API, SSE, rendering
@@ -38,6 +39,34 @@ function durabilityHtml(item) {
   const pct = Math.round((left / item.maxDurability) * 100);
   const tone = pct > 55 ? 'good' : (pct > 25 ? 'warn' : 'bad');
   return `<span class="slot__dur ${tone}"><i style="width:${pct}%"></i></span>`;
+}
+
+const revealState = new Set();
+let revealObserver = null;
+
+function initReveals(root = document) {
+  if (revealObserver) { revealObserver.disconnect(); revealObserver = null; }
+  const scope = root || document;
+  const els = Array.from(scope.querySelectorAll('[data-reveal]'));
+  if (!els.length) return;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    els.forEach((el) => el.classList.add('is-in', 'no-anim'));
+    return;
+  }
+  revealObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      const el = entry.target;
+      el.classList.add('is-in');
+      if (el.dataset.reveal) revealState.add(el.dataset.reveal);
+      revealObserver.unobserve(el);
+    });
+  }, { threshold: 0.08, rootMargin: '0px 0px -30px 0px' });
+  els.forEach((el) => {
+    const key = el.dataset.reveal || '';
+    if (key && revealState.has(key)) { el.classList.add('is-in', 'no-anim'); return; }
+    revealObserver.observe(el);
+  });
 }
 
 const PAGES = {
@@ -282,7 +311,7 @@ function serverPulseHtml() {
     map.set(key, rec);
   });
   return `
-    <div class="server-pulse">
+    <div class="server-pulse" data-reveal="dash-pulse">
       <span class="server-pulse__label">${icon('server')} Server pulse</span>
       <div class="server-pulse__list">
         ${Array.from(map.values()).map((s) => `
@@ -376,10 +405,10 @@ function botCard(bot, i = 0) {
     <article class="bot-card ${bot.status === 'online' ? 'is-online' : ''} ${peers > 1 ? 'is-shared' : ''}" data-id="${esc(bot.id)}" data-sig="${esc(structuralSig(bot))}" style="--i:${i};--hue:${hue};--server:${sHue}">
       <div class="bot-card__top">
         <button class="bot-avatar bot-avatar--btn" type="button" style="--hue:${hue}" data-action="bot-page" data-id="${esc(bot.id)}" title="Open ${esc(bot.name)}'s full profile" aria-label="Open ${esc(bot.name)}'s full profile"><span class="avatar-initial">${esc(initial(bot.name))}</span>${skinHeadHtml(bot.name)}<span class="status-dot ${st.dot}"></span></button>
-        <div class="bot-id">
+        <button class="bot-id bot-id--btn" type="button" data-action="bot-page" data-id="${esc(bot.id)}" title="Open ${esc(bot.name)}'s full page">
           <h3 title="${esc(bot.name)}">${esc(bot.name)}</h3>
           <p title="${esc(bot.host)}:${bot.port}"><i class="server-dot"></i>${esc(serverLabel(bot))}</p>
-        </div>
+        </button>
         <span class="pill ${st.pill}"><i></i>${st.label}</span>
       </div>
 
@@ -794,16 +823,18 @@ function activityHtml() {
       </div>
       <span class="stream-count" id="activity-count">${items.length} events</span>
     </div>
-    <div class="stream-shell">
+    <div class="stream-shell" data-reveal="act-stream">
       <div class="stream" id="activity-feed">${streamListHtml(items)}</div>
     </div>`;
 }
 
 /* ── single bot page ────────────────────────────────────────────────────── */
-async function openBotPage(id) {
+async function openBotPage(id, push = true) {
   const bot = findBot(id);
   if (!bot) return;
+  if (state.view === 'bot' && state.botId === id) return;
   if ($('#console-drawer') && $('#console-drawer').classList.contains('is-open')) closeConsole(true);
+  revealState.clear();
   state.botId = id;
   state.view = 'bot';
   updateChrome();
@@ -812,6 +843,7 @@ async function openBotPage(id) {
   const sub = $('#page-sub');
   if (title) title.textContent = bot.name;
   if (sub) sub.textContent = `${bot.host}:${bot.port} · ${statusMeta(bot).label}`;
+  if (push) history.pushState({}, '', `#/bot/${id}`);
   if (window.innerWidth <= 1080) window.scrollTo({ top: 0, behavior: 'smooth' });
   if (!state.logs.get(id) || !state.logs.get(id).length) {
     try {
@@ -868,8 +900,8 @@ function botPageHtml(id) {
     <div class="botpage" style="--hue:${hashHue(bot.name)};--server:${serverHueOf(bot)}">
       <button class="botpage__back" type="button" data-view="dashboard">${icon('arrow')} Back to fleet</button>
 
-      <header class="botpage__hero">
-        <div class="botpage__avatar"><span class="avatar-initial">${esc(initial(bot.name))}</span>${skinHeadHtml(bot.name, 'botpage__skin')}<span class="status-dot ${st.dot}"></span></div>
+      <header class="botpage__hero" data-reveal="bp-hero">
+        <div class="botpage__avatar"><span class="avatar-initial">${esc(initial(bot.name))}</span><img class="botpage__skin" src="${skinUrl(bot.name, 'body', 200)}" alt="" loading="lazy" decoding="async" data-skin="1" /><span class="status-dot ${st.dot}"></span></div>
         <div class="botpage__id">
           <span class="botpage__eyebrow">bot profile</span>
           <h2>${esc(bot.name)} <span class="pill ${st.pill}"><i></i>${st.label}</span></h2>
@@ -888,7 +920,7 @@ function botPageHtml(id) {
         </div>
       </header>
 
-      <div class="botpage__stats">
+      <div class="botpage__stats" data-reveal="bp-stats" style="--d:70ms">
         ${bpMetric('heart', 'Health', `${hp}/20`, 'hitpoints', hp <= 6 ? 'is-bad' : '')}
         ${bpMetric('food', 'Food', `${food}/20`, 'hunger', food <= 6 ? 'is-warn' : '')}
         ${bpMetric('activity', 'Ping', bot.ping == null ? '—' : `${bot.ping} ms`, 'latency')}
@@ -898,7 +930,7 @@ function botPageHtml(id) {
       </div>
 
       <div class="botpage__grid">
-        <section class="bpanel">
+        <section class="bpanel" data-reveal="bp-player" style="--d:120ms">
           <header class="bpanel__head"><h3>Player</h3><span class="bpanel__live"><i></i> live</span></header>
           <div class="bkv">
             <div><span>Position</span><b>${esc(pos)}</b></div>
@@ -916,14 +948,14 @@ function botPageHtml(id) {
           </div>
         </section>
 
-        <section class="bpanel">
+        <section class="bpanel" data-reveal="bp-recent" style="--d:170ms">
           <header class="bpanel__head"><h3>Recent activity</h3><button class="bpanel__link" type="button" data-action="console" data-id="${esc(bot.id)}">Open console ${icon('arrow')}</button></header>
           <div class="brecent" id="bp-recent">
             ${logs.length ? logs.map(bpRecentRow).join('') : `<div class="brecent__empty">${icon('terminal')}No activity yet. Open the console and say hello.</div>`}
           </div>
         </section>
 
-        <section class="bpanel bpanel--wide">
+        <section class="bpanel bpanel--wide" data-reveal="bp-inv" style="--d:220ms">
           <header class="bpanel__head"><h3>Inventory</h3><span class="bpanel__count">${used}/36 slots</span><button class="bpanel__link" type="button" data-action="inventory" data-id="${esc(bot.id)}">Open inventory ${icon('arrow')}</button></header>
           <div class="binv">
             ${inv.length ? inv.slice(0, 9).map((it) => `<span class="binv__slot">${itemImgHtml(it, bot.version, 'binv__img')}${itemCountHtml(it)}</span>`).join('') : `<span class="binv__empty">${icon('chest')}Inventory is empty</span>`}
@@ -932,7 +964,7 @@ function botPageHtml(id) {
           <p class="bpanel__sub">Hotbar first, then storage — the full Minecraft layout lives in the inventory drawer.</p>
         </section>
 
-        <section class="bpanel">
+        <section class="bpanel" data-reveal="bp-session" style="--d:270ms">
           <header class="bpanel__head"><h3>Session</h3><span class="bpanel__live"><i></i> ${st.label}</span></header>
           <div class="bkv">
             <div><span>Auto-eat</span><b>${bot.autoEat ? 'On' : 'Off'}</b></div>
@@ -1116,7 +1148,7 @@ function terminalHtml() {
           <button class="term-jump" id="term-jump" type="button" hidden>${icon('arrow')} Jump to latest</button>
         </div>
         <aside class="term-side">
-          <div class="term-card">
+          <div class="term-card" data-reveal="term-fleet">
             <p class="term-side__title">Fleet</p>
             <div class="term-fleet">
               ${fleet.map((b) => `
@@ -1127,13 +1159,13 @@ function terminalHtml() {
                 </button>`).join('') || '<span class="term-none">No bots yet.</span>'}
             </div>
           </div>
-          <div class="term-card">
+          <div class="term-card" data-reveal="term-quick" style="--d:80ms">
             <p class="term-side__title">Quick commands</p>
             <div class="term-quick">
               ${['/afk', '/login Sandun123', '/spawn', '/home', '/warp crates', '/list'].map((cmd) => `<button type="button" class="cmd-preset" data-term-cmd="${esc(cmd)}">${esc(cmd)}</button>`).join('')}
             </div>
           </div>
-          <div class="term-card">
+          <div class="term-card" data-reveal="term-session" style="--d:160ms">
             <p class="term-side__title">Session</p>
             <div class="term-session">
               <div><span>Lines</span><b id="term-count">${c.total.toLocaleString()}</b></div>
@@ -1174,6 +1206,7 @@ function renderView() {
   else if (state.view === 'bot') $('#view').innerHTML = botPageHtml(state.botId);
   else $('#view').innerHTML = dashboardHtml();
   updateUptimes();
+  initReveals($('#view'));
 }
 
 function scheduleViewRender() {
@@ -1513,6 +1546,7 @@ async function enterApp() {
     await loadState();
     connectSSE();
     startTick();
+    applyRoute();
   } catch (e) {
     if (!state.authed) return;
     state.loading = false;
@@ -1645,7 +1679,7 @@ function startTick() {
   state.tick = setInterval(updateUptimes, 1000);
 }
 
-function switchView(view) {
+function switchView(view, push = true) {
   if (!PAGES[view] || state.view === view) {
     if (state.view === view) {
       state.unread = false;
@@ -1653,11 +1687,23 @@ function switchView(view) {
     }
     return;
   }
+  revealState.clear();
   state.view = view;
   if (view === 'activity') state.unread = false;
   if (view === 'terminal') loadTerminal().catch(() => {});
   updateChrome();
   renderView();
   updateActivityDot();
+  if (push) history.pushState({}, '', `#/${view}`);
   if (window.innerWidth <= 1080) window.scrollTo({ top: 0, behavior: 'smooth' });
 }
+
+function applyRoute() {
+  if (!state.authed) return;
+  const raw = String(location.hash || '').replace(/^#\/?/, '');
+  const [view, id] = raw.split('/');
+  if (view === 'bot' && id) { openBotPage(id, false); return; }
+  if (PAGES[view]) { switchView(view, false); return; }
+  if (!raw) switchView('dashboard', false);
+}
+window.addEventListener('popstate', () => applyRoute());
