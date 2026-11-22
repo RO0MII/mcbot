@@ -5,9 +5,12 @@
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "git fetch origin && node index.js",
+    "start": "node scripts/panel.js",
     "discord": "node discord-bridge.js",
-    "start:all": "node index.js & node discord-bridge.js"
+    "start:all": "node index.js & node discord-bridge.js",
+    "panel": "node scripts/panel.js",
+    "bot": "node index.js",
+    "dashboard": "node dashboard/server.js"
   },
   "dependencies": {
     "discord.js": "^14.26.4",

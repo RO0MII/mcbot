@@ -17,3 +17,6 @@ Thumbs.db
 .vscode/
 .idea/
 .env
+
+# Dashboard runtime data (contains bot passwords + caches)
+dashboard/data/

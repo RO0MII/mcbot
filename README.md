@@ -51,10 +51,29 @@ npm install
 
 ---
 
-## ▶️ Usage
+## 🖥️ Web dashboard
+
+`npm start` brings up **MCBot Control** on **port 80** — a self-hosted panel for
+every bot: live chat, real inventories, player skins, auto-login, auto-reconnect,
+auto-eat, `/afk` slot clicking and group-wide commands.
 
 ```bash
-npm start
+npm start          # panel on http://localhost/
+npm run bot        # terminal-only bot (the original CLI)
+npm run dashboard  # run the panel in the foreground (no systemd)
+```
+
+Set `DASHBOARD_PASSWORD` before exposing it to the internet. Runtime data
+(bot configs, icon/skin caches) stays in `dashboard/data/` and is git-ignored.
+
+Project page: **https://ro0mii.github.io/mcbot/**
+
+---
+
+## ▶️ Usage (terminal bot)
+
+```bash
+npm run bot
 # or
 node index.js
 ```

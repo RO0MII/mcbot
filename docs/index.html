@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MCBot Control — every bot, one calm panel</title>
+  <meta name="description" content="A self-hosted control room for Minecraft bots: live chat, real inventories, player skins, auto-login, auto-eat and group commands." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"><span></span><span></span><span></span></div>
+
+  <header class="nav">
+    <a class="brand" href="./" aria-label="MCBot Control home">
+      <span class="brand__mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="m12 2.8 8 4.4v9.6l-8 4.4-8-4.4V7.2l8-4.4Z"/><path d="M4 7.2 12 12l8-4.8M12 12v9.2"/></svg>
+      </span>
+      <span class="brand__text">MCBot <small>Control</small></span>
+    </a>
+    <nav class="nav__links" aria-label="Sections">
+      <a href="#features">Features</a>
+      <a href="#groups">Groups</a>
+      <a href="#start">Quick start</a>
+    </nav>
+    <a class="btn btn--quiet" href="https://github.com/RO0MII/mcbot">GitHub <span aria-hidden="true">↗</span></a>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero__copy">
+        <p class="kicker"><span class="live"></span> A control room for your Minecraft fleet</p>
+        <h1>Every bot.<br /><em>One calm panel.</em></h1>
+        <p class="lede">Keep them online, logged in and fed. Watch chat, open real inventories, see player skins, and run one command across a whole group.</p>
+        <div class="hero__actions">
+          <a class="btn btn--primary" href="#start">Start the panel</a>
+          <a class="btn btn--quiet" href="https://github.com/RO0MII/mcbot">View source</a>
+        </div>
+        <dl class="facts">
+          <div><dt>Bots</dt><dd>Unlimited</dd></div>
+          <div><dt>Groups</dt><dd>Unlimited</dd></div>
+          <div><dt>Runs on</dt><dd>Port 80</dd></div>
+        </dl>
+      </div>
+
+      <div class="deck" role="img" aria-label="Preview of the MCBot Control dashboard">
+        <div class="deck__bar">
+          <span class="deck__lights"><i></i><i></i><i></i></span>
+          <span class="deck__title">mcbot / live overview</span>
+          <span class="deck__live"><i></i> live</span>
+        </div>
+        <div class="deck__body">
+          <div class="deck__server"><i></i> mc.hungrybirds.org <em>4 / 4 bots</em></div>
+
+          <article class="botrow">
+            <img src="https://minotar.net/helm/adalei/64.png" alt="" loading="lazy" />
+            <div class="botrow__id"><b>adalei</b><span>Online · 5m 36s</span></div>
+            <div class="botrow__vitals"><span class="bar bar--hp"><i style="width:50%"></i></span><span class="bar bar--food"><i style="width:80%"></i></span></div>
+            <div class="botrow__items"><span>SW</span><span>CB</span><span>ST</span><span class="more">+30</span></div>
+            <span class="state"></span>
+          </article>
+
+          <article class="botrow">
+            <img src="https://minotar.net/helm/navig/64.png" alt="" loading="lazy" />
+            <div class="botrow__id"><b>navig</b><span>Online · 2h 14m</span></div>
+            <div class="botrow__vitals"><span class="bar bar--hp"><i style="width:100%"></i></span><span class="bar bar--food"><i style="width:100%"></i></span></div>
+            <div class="botrow__items"><span>TO</span><span>SW</span><span>AB</span><span class="more">+15</span></div>
+            <span class="state"></span>
+          </article>
+
+          <article class="botrow">
+            <img src="https://minotar.net/helm/romii/64.png" alt="" loading="lazy" />
+            <div class="botrow__id"><b>romii</b><span>Online · 48m</span></div>
+            <div class="botrow__vitals"><span class="bar bar--hp"><i style="width:85%"></i></span><span class="bar bar--food"><i style="width:60%"></i></span></div>
+            <div class="botrow__items"><span>AR</span><span>SW</span><span>BD</span><span class="more">+9</span></div>
+            <span class="state"></span>
+          </article>
+
+          <div class="deck__console">
+            <span class="deck__prompt">/afk</span>
+            <span class="deck__msg">sent to <b>3 bots</b> in <b>lazy</b></span>
+            <span class="deck__ok">done</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="features">
+      <header class="section__head">
+        <h2>Built around the bot, not the dashboard.</h2>
+        <p>Everything is live from the server itself — not a mock, not a cached guess.</p>
+      </header>
+
+      <div class="features">
+        <article class="feature">
+          <span class="feature__icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m7 9 3 3-3 3M13 15h4"/></svg></span>
+          <h3>Live console</h3>
+          <p>Chat, logins, switches and errors stream in as they happen, with a reconnecting live badge.</p>
+        </article>
+        <article class="feature">
+          <span class="feature__icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 10h18"/><rect x="9.5" y="9" width="5" height="5" rx="1.2"/></svg></span>
+          <h3>Real inventory</h3>
+          <p>27 storage slots, hotbar, armour, off-hand and 2×2 crafting — laid out like the game, with item textures.</p>
+        </article>
+        <article class="feature">
+          <span class="feature__icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.4"/><path d="M4.8 20a7.2 7.2 0 0 1 14.4 0"/></svg></span>
+          <h3>Player profile</h3>
+          <p>The bot's real skin, health, food, XP, effects, dimension, ping, position and equipped gear in one place.</p>
+        </article>
+        <article class="feature">
+          <span class="feature__icon"><svg viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="4"/></svg></span>
+          <h3>Stays online</h3>
+          <p>Auto-login, auto-reconnect and a socket watchdog. If a session dies, the panel notices and rebuilds it.</p>
+        </article>
+        <article class="feature">
+          <span class="feature__icon"><svg viewBox="0 0 24 24"><path d="M14.2 4.1a4.4 4.4 0 0 1 5.7 5.7l-1.6 1.6-5.7-5.7 1.6-1.6Z"/><path d="m12.9 5.4 5.7 5.7-6.4 6.4a3.4 3.4 0 0 1-4.8-4.8l5.5-7.3Z"/></svg></span>
+          <h3>Auto-eat &amp; /afk</h3>
+          <p>Eats the best food when hunger drops, and clicks the first slot of the GUI that opens after <code>/afk</code>.</p>
+        </article>
+        <article class="feature">
+          <span class="feature__icon"><svg viewBox="0 0 24 24"><circle cx="7" cy="7" r="3"/><circle cx="17" cy="7" r="3"/><circle cx="12" cy="17" r="3"/><path d="M9.5 8.6 11 14.1M14.5 8.6 13 14.1"/></svg></span>
+          <h3>Group commands</h3>
+          <p>Pick a group, type once, and the command goes to every online bot in it — with skipped bots reported.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section split" id="groups">
+      <div class="split__copy">
+        <p class="label">groups</p>
+        <h2>One command.<br />The whole group.</h2>
+        <p class="split__lede">Stop clicking through bots one by one. Send <code>/afk</code>, a server switch or a message to a whole crew in a single step.</p>
+        <ul class="ticks">
+          <li>Unlimited groups and bots</li>
+          <li>Per-server colours and a server pulse</li>
+          <li>Group power switch, restart and run-command</li>
+        </ul>
+      </div>
+      <div class="terminal" aria-label="Group command example">
+        <div class="terminal__bar"><span class="deck__lights"><i></i><i></i><i></i></span> run on group · lazy</div>
+        <div class="terminal__body">
+          <p><span class="t-muted">$</span> /afk</p>
+          <p class="t-dim">→ adalei   ok</p>
+          <p class="t-dim">→ navig    ok</p>
+          <p class="t-dim">→ romii    ok</p>
+          <p class="t-ok">✓ sent to 3 bots · 0 skipped</p>
+          <p class="t-muted">first GUI slot clicked automatically</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section start" id="start">
+      <div class="start__copy">
+        <p class="label">quick start</p>
+        <h2>Online in one command.</h2>
+        <p>Install once, start the panel, open port 80. The dashboard manages the bots from there.</p>
+        <p class="start__note">Set <code>DASHBOARD_PASSWORD</code> before exposing it to the internet.</p>
+      </div>
+      <div class="start__code">
+        <div class="terminal__bar"><span class="deck__lights"><i></i><i></i><i></i></span> terminal</div>
+        <pre><code><span class="c-muted"># clone and install</span>
+git clone https://github.com/RO0MII/mcbot.git
+cd mcbot
+npm install
+
+<span class="c-muted"># start the panel on port 80</span>
+npm start</code></pre>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="brand brand--footer">
+      <span class="brand__mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="m12 2.8 8 4.4v9.6l-8 4.4-8-4.4V7.2l8-4.4Z"/><path d="M4 7.2 12 12l8-4.8M12 12v9.2"/></svg></span>
+      <span class="brand__text">MCBot <small>Control</small></span>
+    </div>
+    <p>Self-hosted. Your bots, your server, your data.</p>
+    <div class="footer__links">
+      <a href="https://github.com/RO0MII/mcbot">Source</a>
+      <a href="https://github.com/RO0MII/mcbot/issues">Issues</a>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

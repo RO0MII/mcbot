@@ -50,13 +50,21 @@ const MINECRAFT_ITEMS_PATH = './minecraft-items.txt'; // Minecraft block/item na
 
 // ---- Auto login + server switch ----
 const AUTO_LOGIN = true;                  // detect a login prompt in chat and log in automatically
-const LOGIN_PASSWORD = 'romi321';         // password sent as "/login <password>"
+const LOGIN_PASSWORD = 'Sandun123';       // password sent as "/login <password>" and "/register <password> <password>"
 const LOGIN_COMMAND = `/login ${LOGIN_PASSWORD}`;
+const REGISTER_COMMAND = `/register ${LOGIN_PASSWORD} ${LOGIN_PASSWORD}`;
+const LOGIN_MAX_ATTEMPTS = 5;             // retry this many times if the server keeps asking
+const LOGIN_RETRY_DELAY = 6000;           // ms between login attempts
 const SWITCH_COMMAND = '/server oneblock';// command that moves us to the target sub-server
 const SWITCH_AFTER_LOGIN = 4000;          // ms after logging in before switching servers
 const SWITCH_FALLBACK = 8000;             // ms after joining to switch anyway (login prompt or not)
+let autoSwitchEnabled = true;             // !switch off disables all /server oneblock sends
 // Chat lines that mean "you must authenticate" — triggers LOGIN_COMMAND.
-const LOGIN_PROMPT = /\b(login|loggin|log in|register|registro|authme|password)\b/i;
+// Matches "/login", "please login", "not registered", "register with /register" and
+// AuthMe-style prompts, but ignores ordinary chat that merely mentions the word.
+const LOGIN_PROMPT = /\/(?:login|register|reg)\b|\b(?:please|must|need to|have to)\s+(?:log ?in|login|register)\b|\bnot\s+(?:logged in|registered)\b|\b(?:incorrect|wrong)\s+password\b|\blog ?in to (?:continue|play)\b|\bauthme\b/i;
+// Chat lines that mean the login/register actually worked.
+const LOGIN_SUCCESS = /(?:successfully\s+(?:logged|logged in|registered|authenticated)|you\s+(?:are|have been)\s+(?:now\s+)?(?:logged in|registered|authenticated)|logged in successfully|registered successfully|login\s+successful|registration\s+successful|welcome back|already\s+(?:logged in|authenticated))/i;
 
 // ---- Auto re-join oneblock after a restart ----
 // When the sub-server restarts we get bounced to the lobby. Re-send the switch
@@ -1568,6 +1576,7 @@ async function main() {
         drawBox('  ⌘  BOT COMMANDS', [
           ['!help', 'Show this command list'],
           ['!afk on|off', 'Toggle anti-AFK movement'],
+          ['!switch on|off', 'Toggle the /server oneblock auto-switch'],
           ['!games on|off', 'Auto-answer chat games'],
           ['!pos', 'Show current coordinates'],
           ['!health', 'Show health & hunger'],
@@ -1615,6 +1624,20 @@ async function main() {
           ui.warn('Anti-AFK OFF', 'bot will sit still');
         } else {
           ui.err('Usage', 'type  !afk on  or  !afk off');
+        }
+        break;
+      }
+
+      case 'switch': {
+        const mode = arg.toLowerCase();
+        if (mode === 'on') {
+          autoSwitchEnabled = true;
+          ui.ok('Server switch ON', SWITCH_COMMAND);
+        } else if (mode === 'off') {
+          autoSwitchEnabled = false;
+          ui.warn('Server switch OFF', 'no more /server oneblock will be sent');
+        } else {
+          ui.err('Usage', 'type  !switch on  or  !switch off');
         }
         break;
       }
@@ -1841,7 +1864,11 @@ async function main() {
 
     let joined = false;   // becomes true once we actually spawn in
     let offline = false;  // set when the failure is just "server unreachable"
-    let loggedIn = false; // becomes true once we've sent LOGIN_COMMAND
+    let loggedIn = false; // becomes true once we've sent a login/register command
+    let loginConfirmed = false; // true once the server says we're logged in
+    let loginAttempts = 0;
+    let loginTimer = null;
+    let loginCooldown = 0;
     let switched = false; // becomes true once we've sent SWITCH_COMMAND
     let switchFallback = null; // timer that switches anyway if no login prompt arrives
     let reswitchTimer = null;  // periodic "/server oneblock" so a restart bounce gets us back
@@ -1853,7 +1880,7 @@ async function main() {
     // periodic re-send going so a later sub-server restart (which bounces us to
     // the lobby) always lands us back on oneblock.
     function doSwitch() {
-      if (verifying || switched || !bot || !bot.player) return;
+      if (!autoSwitchEnabled || verifying || switched || !bot || !bot.player) return;
       switched = true;
       if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
       try { bot.chat(SWITCH_COMMAND); ui.ok('Server switch', SWITCH_COMMAND); } catch (_) {}
@@ -1867,19 +1894,58 @@ async function main() {
       if (reswitchTimer) clearTimeout(reswitchTimer);
       const delay = RESWITCH_MIN + Math.floor(Math.random() * (RESWITCH_MAX - RESWITCH_MIN + 1));
       reswitchTimer = setTimeout(() => {
-        if (bot && bot.player) {
+        if (autoSwitchEnabled && bot && bot.player) {
           try { bot.chat(SWITCH_COMMAND); ui.info('Re-join oneblock', `${SWITCH_COMMAND} (auto, every 5-10m)`); } catch (_) {}
         }
         scheduleReswitch(); // queue the next cycle
       }, delay);
     }
 
-    // Send the login command once, then switch SWITCH_AFTER_LOGIN ms later.
-    function doLogin() {
-      if (verifying || loggedIn || !bot || !bot.player) return;
+    // Send the login command, retrying every few seconds until the server
+    // confirms (or we hit LOGIN_MAX_ATTEMPTS). Sends /register when the server
+    // asks for registration instead of a login.
+    function doLogin(message) {
+      if (verifying || loginConfirmed || !bot || !bot.player) return;
+      const t = Date.now();
+      if (t - loginCooldown < 4500) return;          // debounce repeated prompt lines
+      if (loginAttempts >= LOGIN_MAX_ATTEMPTS) {
+        if (loginAttempts === LOGIN_MAX_ATTEMPTS) {
+          loginAttempts += 1;
+          ui.err('Auto-login failed', `no success after ${LOGIN_MAX_ATTEMPTS} attempts — check LOGIN_PASSWORD`);
+        }
+        return;
+      }
+      const wantsRegister = /register|not\s+registered|registro/i.test(String(message || ''));
+      const cmd = wantsRegister ? REGISTER_COMMAND : LOGIN_COMMAND;
+      loginAttempts += 1;
       loggedIn = true;
-      try { bot.chat(LOGIN_COMMAND); ui.ok('Auto-login', `sent ${LOGIN_COMMAND}`); } catch (_) {}
-      setTimeout(doSwitch, SWITCH_AFTER_LOGIN);
+      loginCooldown = t;
+      try {
+        bot.chat(cmd);
+        ui.ok(wantsRegister ? 'Auto-register' : 'Auto-login', `sent ${wantsRegister ? '/register' : '/login'} (attempt ${loginAttempts}/${LOGIN_MAX_ATTEMPTS})`);
+      } catch (_) {
+        loginCooldown = 0;
+        return;
+      }
+      // Fallback: if the server never confirms, try again shortly.
+      if (loginTimer) clearTimeout(loginTimer);
+      loginTimer = setTimeout(() => {
+        loginTimer = null;
+        if (!loginConfirmed && bot && bot.player) doLogin(message);
+      }, LOGIN_RETRY_DELAY);
+      // Switch to the sub-server only after the first successful send.
+      if (loginAttempts === 1) setTimeout(doSwitch, SWITCH_AFTER_LOGIN);
+    }
+
+    // Server said login/register worked — stop retrying and switch.
+    function confirmLogin(message) {
+      if (loginConfirmed) return;
+      loginConfirmed = true;
+      loggedIn = true;
+      if (loginTimer) { clearTimeout(loginTimer); loginTimer = null; }
+      if (loginAttempts >= LOGIN_MAX_ATTEMPTS) ui.ok('Auto-login', 'server confirmed the login');
+      if (!switched) setTimeout(doSwitch, SWITCH_AFTER_LOGIN);
+      if (message) ui.ok('Logged in', message.slice(0, 120));
     }
 
     // Watchdog: if nothing happens within JOIN_TIMEOUT (auto-detect hang,
@@ -1935,8 +2001,11 @@ async function main() {
         ui.ok('GUARD', 'verification passed — resuming');
       }
       if (verifying) return; // still verifying — drop everything
-      // Auto-login: the server asks us to authenticate -> send LOGIN_COMMAND.
-      if (AUTO_LOGIN && !loggedIn && LOGIN_PROMPT.test(message)) doLogin();
+      // Auto-login: the server asks us to authenticate -> send /login (or /register).
+      if (AUTO_LOGIN) {
+        if (LOGIN_SUCCESS.test(message)) confirmLogin(message);
+        else if (!loginConfirmed && LOGIN_PROMPT.test(message)) doLogin(message);
+      }
       // Restart / "sent to lobby" -> re-join oneblock fast (debounced 30s).
       if (AUTO_LOGIN && (LOBBY_PROMPT.test(message) || RESTART_COUNTDOWN.test(message))) {
         const now = Date.now();
@@ -1944,7 +2013,7 @@ async function main() {
           lobbyReswitchAt = now;
           ui.warn('Restart / lobby detected', `re-joining oneblock in ${LOBBY_RESWITCH_DELAY / 1000}s`);
           setTimeout(() => {
-            if (bot && bot.player) { try { bot.chat(SWITCH_COMMAND); ui.ok('Re-join oneblock', SWITCH_COMMAND); } catch (_) {} }
+            if (autoSwitchEnabled && bot && bot.player) { try { bot.chat(SWITCH_COMMAND); ui.ok('Re-join oneblock', SWITCH_COMMAND); } catch (_) {} }
           }, LOBBY_RESWITCH_DELAY);
         }
       }
@@ -1982,6 +2051,7 @@ async function main() {
       clearTimeout(watchdog);
       if (switchFallback) { clearTimeout(switchFallback); switchFallback = null; }
       if (reswitchTimer) { clearTimeout(reswitchTimer); reswitchTimer = null; }
+      if (loginTimer) { clearTimeout(loginTimer); loginTimer = null; }
       if (verifyTimer) { clearTimeout(verifyTimer); verifyTimer = null; }
       verifying = false;
       if (mining) mining = null; // stop the mine loop; the old bot is gone
