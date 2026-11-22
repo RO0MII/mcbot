@@ -33,6 +33,7 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = path.join(ROOT, 'data');
 const BOTS_FILE = path.join(DATA_DIR, 'bots.json');
 const PORTFOLIO_DIR = process.env.PORTFOLIO_DIR || '/home/ubuntu/sandun-portfolio';
+const SITE_DIR = process.env.SITE_DIR || path.join(ROOT, '..', 'docs');
 const PORT = parseInt(process.env.PORT || '80', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || 'Sandun123';
@@ -1806,9 +1807,13 @@ function createServer() {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('Referrer-Policy', 'same-origin');
+    // The bundled project site (/site) shows player skins from minotar.net.
+    const isSite = url.pathname === '/site' || url.pathname.startsWith('/site/');
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+      isSite
+        ? "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://minotar.net; connect-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+        : "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
     );
 
     if (url.pathname.startsWith('/api/')) {
@@ -1817,6 +1822,17 @@ function createServer() {
         if (!res.headersSent) json(res, 500, { error: 'Internal server error' });
       });
       return;
+    }
+
+    // ── static: the project website at /site (also used by GitHub Pages) ──
+    if (url.pathname === '/site' || url.pathname.startsWith('/site/')) {
+      const rel = url.pathname.replace(/^\/site\/?/, '');
+      if (!rel || rel.endsWith('/')) {
+        return serveFile(req, res, path.join(SITE_DIR, 'index.html'));
+      }
+      const file = safeJoin(SITE_DIR, rel);
+      if (!file) { res.writeHead(400); return res.end('Bad path'); }
+      return serveFile(req, res, file);
     }
 
     // ── static: portfolio at /portfolio ──

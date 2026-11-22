@@ -436,6 +436,59 @@ function noResults() {
 }
 
 /* ── rendering: dashboard ───────────────────────────────────────────────── */
+function fleetHtml(title, sub) {
+  const s = getStats();
+  const bars = Array.from({ length: 26 }, (_, i) => `<i style="--h:${18 + ((i * 37) % 74)}%;--d:${i * 55}"></i>`).join('');
+  const events = state.activity.slice(0, 5);
+  const ticker = events.length
+    ? events.concat(events).map((item) => {
+        const e = item.entry;
+        const t = String(e.text || '').slice(0, 90);
+        return `<span class="ticker__item"><b>${esc(item.name)}</b>${esc(t)}</span>`;
+      }).join('')
+    : '<span class="ticker__item"><b>Waiting</b>for the first event…</span>';
+  return `
+    <section class="fleet">
+      <div class="fleet__head">
+        <div class="fleet__copy">
+          <span class="fleet__eyebrow"><i></i> Fleet control</span>
+          <h2>${esc(title)}</h2>
+          <p>${esc(sub)}</p>
+        </div>
+        <div class="fleet__actions">
+          <button class="btn btn-ghost" data-action="refresh">${icon('restart')}<span>Refresh</span></button>
+          <button class="btn btn-primary" data-action="add">${icon('plus')}<span>Add bot</span></button>
+        </div>
+      </div>
+      <div class="fleet__deck">
+        <div class="metric metric--lime"><span>${icon('zap')} Bots online</span><b>${s.online}</b><em>of ${s.total}</em></div>
+        <div class="metric metric--blue"><span>${icon('server')} Servers</span><b>${s.servers}</b><em>${s.groups} groups</em></div>
+        <div class="metric metric--coral"><span>${icon('users')} Players</span><b>${s.players}</b><em>unique</em></div>
+        <div class="metric metric--mint"><span>${icon('clock')} Avg uptime</span><b>${fmtShort(s.avgUptime || 0)}</b><em>${s.connecting} connecting</em></div>
+        <div class="fleet__wave" aria-hidden="true"><span>signal</span><div>${bars}</div></div>
+        <div class="fleet__health">
+          <span class="fleet__health-dot"></span>
+          <div><b>${s.masterOn ? 'Streaming' : 'Idle'}</b><em>live socket</em></div>
+        </div>
+      </div>
+      <div class="ticker">
+        <span class="ticker__tag">Live</span>
+        <div class="ticker__viewport"><div class="ticker__track">${ticker}</div></div>
+      </div>
+    </section>`;
+}
+
+function fmtShort(ms) {
+  if (!ms || ms < 0) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
 function dashboardHtml() {
   const s = getStats();
   const bots = filteredBots();
@@ -446,11 +499,7 @@ function dashboardHtml() {
     : `${s.online} online · ${s.connecting} connecting · ${s.servers} server${s.servers === 1 ? '' : 's'} under control.`;
 
   return `
-    ${pageHead('Live overview', title, sub, `
-      <button class="btn btn-ghost" data-action="refresh">${icon('restart')}<span>Refresh</span></button>
-      <button class="btn btn-primary" data-action="add">${icon('plus')}<span>Add bot</span></button>
-    `)}
-    ${statsHtml()}
+    ${fleetHtml(title, sub)}
     ${serverPulseHtml()}
     ${groupFilterHtml()}
     <div class="section-head">
