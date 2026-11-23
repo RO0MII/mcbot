@@ -11,7 +11,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20261122o" />
+  <link rel="stylesheet" href="styles.css?v=20261122q" />
 </head>
 <body>
   <!-- ── icon sprite ─────────────────────────────────────────────────────── -->
@@ -108,14 +108,8 @@
         <button class="nav__item is-active" data-view="dashboard">
           <svg class="ico"><use href="#i-grid"/></svg><span>Dashboard</span>
         </button>
-        <button class="nav__item" data-view="terminal">
-          <svg class="ico"><use href="#i-terminal"/></svg><span>Terminal</span>
-        </button>
         <button class="nav__item" data-view="servers">
           <svg class="ico"><use href="#i-server"/></svg><span>Servers</span><em id="nav-servers-count" class="nav__count">0</em>
-        </button>
-        <button class="nav__item" data-view="activity">
-          <svg class="ico"><use href="#i-activity"/></svg><span>Activity</span><i id="nav-activity-dot" class="nav__dot" hidden></i>
         </button>
         <a class="nav__item nav__item--link" href="/site" target="_blank" rel="noopener">
           <svg class="ico"><use href="#i-arrow"/></svg><span>Website</span>
@@ -187,9 +181,7 @@
   <!-- ── mobile nav ─────────────────────────────────────────────────────── -->
   <nav class="mobilenav hidden" id="mobilenav" aria-label="Mobile navigation">
     <button class="mobilenav__item is-active" data-view="dashboard"><svg class="ico"><use href="#i-grid"/></svg><span>Home</span></button>
-    <button class="mobilenav__item" data-view="terminal"><svg class="ico"><use href="#i-terminal"/></svg><span>Terminal</span></button>
     <button class="mobilenav__item" data-view="servers"><svg class="ico"><use href="#i-server"/></svg><span>Servers</span></button>
-    <button class="mobilenav__item" data-view="activity"><svg class="ico"><use href="#i-activity"/></svg><span>Activity</span></button>
   </nav>
 
   <!-- ── overlays ───────────────────────────────────────────────────────── -->
@@ -199,9 +191,9 @@
   <div id="item-tip" class="item-tip" hidden></div>
   <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
 
-  <script src="app.js?v=20261122n" defer></script>
-  <script src="console.js?v=20261122n" defer></script>
-  <script src="modals.js?v=20261122n" defer></script>
-  <script src="actions.js?v=20261122n" defer></script>
+  <script src="app.js?v=20261122q" defer></script>
+  <script src="console.js?v=20261122q" defer></script>
+  <script src="modals.js?v=20261122q" defer></script>
+  <script src="actions.js?v=20261122q" defer></script>
 </body>
 </html>

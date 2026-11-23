@@ -229,14 +229,6 @@ async function handleAction(action, el) {
       case 'edit-group': openGroupModal(id); break;
       case 'delete-group': await deleteGroup(id); break;
       case 'group-toggle': await toggleGroup(id); break;
-      case 'view-all-activity': switchView('activity'); break;
-      case 'clear-activity':
-        state.activity = [];
-        state.unread = false;
-        renderView();
-        renderSidebar();
-        toast('info', 'Activity cleared', 'New events will keep streaming in.');
-        break;
       case 'clear-filters':
         state.query = '';
         state.filter = 'all';
@@ -283,42 +275,6 @@ async function toggleAutoEat() {
   }
 }
 
-/* ── terminal helpers ───────────────────────────────────────────────────── */
-async function submitTerminal() {
-  const input = $('#term-input');
-  const target = $('#term-send-target');
-  const message = String((input && input.value) || '').trim();
-  if (!message) return;
-  const wanted = target && target.value === 'all'
-    ? state.bots.filter((b) => b.status === 'online')
-    : state.bots.filter((b) => b.id === (target && target.value));
-  if (!wanted.length) { toast('err', 'Nothing to send to', 'No online bot matches this target.'); return; }
-  let sent = 0;
-  const skipped = [];
-  for (const b of wanted) {
-    try {
-      await api(`/api/bots/${b.id}/chat`, { method: 'POST', body: JSON.stringify({ message }) });
-      sent += 1;
-    } catch (_) { skipped.push(b.name); }
-  }
-  if (input) input.value = '';
-  state.termHistory.push(message);
-  if (state.termHistory.length > 40) state.termHistory.shift();
-  state.termHistoryIndex = state.termHistory.length;
-  toast(sent ? 'ok' : 'err', `Sent to ${sent} bot${sent === 1 ? '' : 's'}`, skipped.length ? `Skipped: ${skipped.join(', ')}` : message);
-}
-
-function exportTerminal() {
-  const lines = termFiltered().map((i) => `${new Date(i.entry.t).toISOString()} [${i.name}] ${i.entry.kind}: ${i.entry.text}`).join('\n');
-  const blob = new Blob([lines || ''], { type: 'text/plain;charset=utf-8' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `mcbot-terminal-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-  toast('ok', 'Terminal exported', `${termFiltered().length} lines downloaded.`);
-}
-
 /* ── wiring ─────────────────────────────────────────────────────────────── */
 function bindEvents() {
   const loginForm = $('#login-form');
@@ -341,8 +297,7 @@ function bindEvents() {
       const value = e.target.value;
       timer = setTimeout(() => {
         state.query = value;
-        if (state.view === 'activity') scheduleActivityFeedRender();
-        else renderView();
+        renderView();
       }, 130);
     });
   }
@@ -394,6 +349,14 @@ function bindEvents() {
   });
 
   document.addEventListener('click', async (e) => {
+    const scrollTo = e.target.closest('[data-bp-scroll]');
+    if (scrollTo) {
+      e.preventDefault();
+      const el = document.getElementById(scrollTo.dataset.bpScroll);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+
     const cmdPreset = e.target.closest('[data-group-cmd]');
     if (cmdPreset) {
       e.preventDefault();
@@ -529,13 +492,6 @@ function bindEvents() {
       renderView();
       return;
     }
-    const afilter = e.target.closest('[data-afilter]');
-    if (afilter) {
-      e.preventDefault();
-      state.activityFilter = afilter.dataset.afilter;
-      renderView();
-      return;
-    }
     const gfilter = e.target.closest('[data-group-filter]');
     if (gfilter) {
       e.preventDefault();
@@ -615,124 +571,10 @@ function bindEvents() {
     });
   }
 
-  // ── terminal page ──
-  document.addEventListener('change', (e) => {
-    if (e.target && e.target.id === 'term-target') {
-      state.termTarget = e.target.value;
-      $$('.term-bot').forEach((el) => el.classList.toggle('is-active', el.dataset.termBot === state.termTarget));
-      renderTerminalLines();
-    }
-  });
-  document.addEventListener('input', (e) => {
-    if (e.target && e.target.id === 'terminal-search') {
-      state.termQuery = e.target.value;
-      renderTerminalLines();
-    }
-  });
-  document.addEventListener('click', async (e) => {
-    const tfilter = e.target.closest('[data-term-filter]');
-    if (tfilter) {
-      e.preventDefault();
-      state.termFilter = tfilter.dataset.termFilter;
-      $$('.term-toolbar .chip').forEach((ch) => ch.classList.toggle('is-active', ch === tfilter));
-      renderTerminalLines();
-      return;
-    }
-    const tbot = e.target.closest('[data-term-bot]');
-    if (tbot) {
-      e.preventDefault();
-      state.termTarget = tbot.dataset.termBot;
-      const sel = $('#term-target');
-      if (sel) sel.value = state.termTarget;
-      $$('.term-bot').forEach((el) => el.classList.toggle('is-active', el.dataset.termBot === state.termTarget));
-      renderTerminalLines();
-      return;
-    }
-    const tcmd = e.target.closest('[data-term-cmd]');
-    if (tcmd) {
-      e.preventDefault();
-      const input = $('#term-input');
-      if (input) { input.value = tcmd.dataset.termCmd; input.focus(); }
-      return;
-    }
-    if (e.target.closest('#term-pause')) {
-      e.preventDefault();
-      state.termPaused = !state.termPaused;
-      const btn = $('#term-pause');
-      if (btn) {
-        btn.classList.toggle('is-on', state.termPaused);
-        btn.innerHTML = `${icon(state.termPaused ? 'play' : 'pause')}<span>${state.termPaused ? 'Paused' : 'Pause'}</span>`;
-        btn.title = state.termPaused ? 'Resume auto-scroll' : 'Pause auto-scroll';
-      }
-      renderTerminalLines();
-      return;
-    }
-    if (e.target.closest('#term-clear')) {
-      e.preventDefault();
-      state.terminalLogs = [];
-      state.termLoaded = true;
-      renderTerminalLines();
-      toast('info', 'Terminal cleared', 'New events will stream in as they arrive.');
-      return;
-    }
-    if (e.target.closest('#term-export')) {
-      e.preventDefault();
-      exportTerminal();
-      return;
-    }
-    if (e.target.closest('#term-jump')) {
-      e.preventDefault();
-      const box = $('#term-lines');
-      if (box) box.scrollTop = box.scrollHeight;
-      return;
-    }
-  });
-  document.addEventListener('click', (e) => {
-    const jump = e.target.closest('[data-bp-jump]');
-    if (jump) {
-      e.preventDefault();
-      const el = document.getElementById(jump.dataset.bpJump);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  });
-  document.addEventListener('scroll', (e) => {
-    if (!e.target || e.target.id !== 'term-lines') return;
-    const box = e.target;
-    const jump = $('#term-jump');
-    if (jump) jump.hidden = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-  }, true);
-  document.addEventListener('keydown', (e) => {
-    if (!e.target || e.target.id !== 'term-input') return;
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (state.termHistory.length) {
-        state.termHistoryIndex = Math.max(0, state.termHistoryIndex - 1);
-        e.target.value = state.termHistory[state.termHistoryIndex] || '';
-      }
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      if (state.termHistory.length) {
-        state.termHistoryIndex = Math.min(state.termHistory.length, state.termHistoryIndex + 1);
-        e.target.value = state.termHistory[state.termHistoryIndex] || '';
-      }
-    }
-  });
   document.addEventListener('submit', async (e) => {
-    if (e.target && e.target.id === 'term-form') {
-      e.preventDefault();
-      await submitTerminal();
-    }
     if (e.target && e.target.id === 'bot-command-form') {
       e.preventDefault();
       await submitBotCommand(e.target);
-    }
-  });
-
-  // live search on the activity page
-  document.addEventListener('input', (e) => {
-    if (e.target && e.target.id === 'activity-search') {
-      state.activityQuery = e.target.value;
-      scheduleActivityFeedRender();
     }
   });
 
