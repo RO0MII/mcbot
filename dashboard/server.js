@@ -1269,6 +1269,7 @@ function scoreboardSnapshot(bot) {
         value: Number(it.value) || 0,
         label: clean,
         nameLabel,
+        player: (() => { try { if (it.displayName && typeof it.displayName.toString === 'function') { const pn = String(it.displayName.toString()); if (pn) return pn.replace(/§./g, '').trim(); } } catch (_) {} return String(it.name || '').replace(/§./g, '').trim(); })(),
         amount,
         amountText,
       };

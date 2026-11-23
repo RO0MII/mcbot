@@ -536,7 +536,6 @@ function dashboardHtml() {
   return `
     ${fleetHtml(title, sub)}
     ${serverPulseHtml()}
-    ${dashScoreHtml()}
     <div class="section-head">
       <div class="section-head__title">
         <h3>Your bots</h3>
@@ -844,6 +843,8 @@ async function openBotPage(id, push = true) {
     state.logs.set(id, Array.isArray(data.logs) ? data.logs : []);
     if (state.view === 'bot' && state.botId === id) renderView();
   } catch (_) {}
+  bpPatch.invSig = '';
+  bpPatch.scoreKeys = '';
   loadBotInventory(id, true);
 }
 
@@ -890,9 +891,8 @@ const scoreHistory = new Map();
 function trackScore(bot) {
   const sb = bot && bot.scoreboard;
   if (!sb || !Array.isArray(sb.items) || !sb.items.length) return;
-  const self = sb.items.find((it) => String(it.label || '').toLowerCase().includes(bot.name.toLowerCase()));
-  if (!self) return;
-  const v = self.amount != null ? self.amount : self.value;
+  const lead = sb.items.find((it) => it.amount != null) || sb.items[0];
+  const v = lead.amount != null ? lead.amount : lead.value;
   const arr = scoreHistory.get(bot.id) || [];
   if (!arr.length || arr[arr.length - 1].v !== v) {
     arr.push({ v, t: Date.now() });
@@ -921,12 +921,15 @@ function bpScoreHtml(bot, opts = {}) {
   if (!sb || !Array.isArray(sb.items) || !sb.items.length) {
     return `<div class="bp-empty">${icon('activity')}No sidebar scoreboard from this server right now.</div>`;
   }
-  const allItems = sb.items;
-  const items = opts.limit ? allItems.slice(0, opts.limit) : allItems;
+  const items = opts.limit ? sb.items.slice(0, opts.limit) : sb.items;
   const max = Math.max(...items.map((it) => (it.amount != null ? Math.abs(Number(it.amount) || 0) : 0)), 1);
-  const selfIdx = allItems.findIndex((it) => String(it.label || '').toLowerCase().includes(bot.name.toLowerCase()));
+  const selfIdx = items.findIndex((it) => String(it.player || it.name || it.label || '').toLowerCase().includes(String(bot.name || '').toLowerCase()));
   const hist = (scoreHistory.get(bot.id) || []).map((x) => x.v);
   const delta = hist.length > 1 ? hist[hist.length - 1] - hist[hist.length - 2] : 0;
+  const selfDelta = selfIdx >= 0 && hist.length > 1 ? hist[hist.length - 1] - hist[hist.length - 2] : 0;
+  const lead = items.find((it) => it.amount != null) || items[0];
+  const leadVal = lead.amountText || (lead.amount == null ? '—' : fmtNum(lead.amount));
+  const selfVal = selfIdx >= 0 ? (items[selfIdx].amountText || (items[selfIdx].amount == null ? '—' : fmtNum(items[selfIdx].amount))) : null;
   return `<div class="bpscore">
     <div class="bpscore__top">
       <div><span class="bpscore__eyebrow"><i></i> live tracker</span><h4>${esc(sb.title || 'Scoreboard')}</h4></div>
@@ -942,15 +945,15 @@ function bpScoreHtml(bot, opts = {}) {
           <span class="bpscore__label">${esc(it.nameLabel || it.label)}</span>
           <span class="bpscore__bar"><i style="width:${pct}%"></i></span>
           <b>${esc(shown)}</b>
-          ${self && delta ? `<em class="${delta > 0 ? 'is-up' : 'is-down'}">${delta > 0 ? '+' : ''}${fmtNum(delta)}</em>` : ''}
+          ${self && selfDelta ? `<em class="${selfDelta > 0 ? 'is-up' : 'is-down'}">${selfDelta > 0 ? '+' : ''}${fmtNum(selfDelta)}</em>` : ''}
         </div>`;
       }).join('')}
     </div>
-    ${selfIdx >= 0 ? `<div class="bpscore__foot" id="bp-score-foot">
-      <div><span>your line</span><b>${esc(items[selfIdx].amountText || (items[selfIdx].amount == null ? '—' : fmtNum(items[selfIdx].amount)))}</b></div>
+    <div class="bpscore__foot" id="bp-score-foot">
+      <div><span>top stat</span><b id="bp-score-lead">${esc(leadVal)}</b></div>
       ${sparkline(hist)}
       <span class="bpscore__foot-note">${hist.length > 1 ? `${hist.length} samples` : 'collecting…'}</span>
-    </div>` : ''}
+    </div>
   </div>`;
 }
 
@@ -1003,7 +1006,7 @@ function renderBotInventory() {
   </div>`;
 }
 
-const bpPatch = { invSig: '', scoreSig: '', dashBot: null };
+const bpPatch = { invSig: '', scoreKeys: '', dashBot: null };
 
 function bindTilt(el, max = 3) {
   if (!el || el.dataset.tiltBound) return;
@@ -1064,9 +1067,9 @@ function patchBotScore(bot) {
   const root = $('#bp-score-root');
   if (!root) return;
   const sb = bot.scoreboard;
-  const sig = sb && Array.isArray(sb.items) ? sb.items.map((i) => `${i.name}:${i.value}:${i.amountText || ''}`).join('|') : '';
-  if (sig !== bpPatch.scoreSig) {
-    bpPatch.scoreSig = sig;
+  const keys = sb && Array.isArray(sb.items) ? sb.items.map((i) => i.name).join('|') : '';
+  if (keys !== bpPatch.scoreKeys) {
+    bpPatch.scoreKeys = keys;
     root.innerHTML = bpScoreHtml(bot);
     return;
   }
@@ -1076,7 +1079,7 @@ function patchBotScore(bot) {
   sb.items.forEach((it, i) => {
     const row = rows[i];
     if (!row) return;
-    const self = String(it.label || '').toLowerCase().includes(bot.name.toLowerCase());
+    const self = String(it.player || it.name || it.label || '').toLowerCase().includes(String(bot.name || '').toLowerCase());
     row.classList.toggle('is-self', self);
     const pct = it.amount == null ? 0 : Math.max(2, Math.min(100, (Math.abs(it.amount) / max) * 100));
     const bar = row.querySelector('.bpscore__bar i');
@@ -1086,22 +1089,11 @@ function patchBotScore(bot) {
     const label = row.querySelector('.bpscore__label');
     if (label) label.textContent = it.nameLabel || it.label;
   });
-}
-
-function dashScoreHtml() {
-  const bot = state.bots.find((b) => b.status === 'online' && b.scoreboard && b.scoreboard.items && b.scoreboard.items.length);
-  if (!bot) return '';
-  bpPatch.dashBot = bot.id;
-  return `<section class="bpanel bpanel--wide dash-score" data-reveal="dash-score">
-    <header class="bpanel__head"><h3>Scoreboard tracker</h3><span class="bpanel__count">${esc(bot.name)} · live</span><button class="bpanel__link" type="button" data-action="bot-page" data-id="${esc(bot.id)}">Open bot page ${icon('arrow')}</button></header>
-    <div id="dash-score-root">${bpScoreHtml(bot, { limit: 6 })}</div>
-  </section>`;
-}
-
-function updateDashScore(bot) {
-  if (!bot || bpPatch.dashBot !== bot.id) return;
-  const root = $('#dash-score-root');
-  if (root) root.innerHTML = bpScoreHtml(bot, { limit: 6 });
+  const leadEl = $('#bp-score-lead');
+  if (leadEl && sb.items.length) {
+    const lead = sb.items.find((it) => it.amount != null) || sb.items[0];
+    leadEl.textContent = lead.amountText || (lead.amount == null ? '—' : fmtNum(lead.amount));
+  }
 }
 
 function botPageHtml(id) {
@@ -1152,53 +1144,84 @@ function botPageHtml(id) {
       </div>
 
       <nav class="bp-nav" aria-label="Bot sections">
-        ${[['bp-player', 'Player'], ['bp-console', 'Console'], ['bp-inventory', 'Inventory'], ['bp-scoreboard', 'Scoreboard'], ['bp-session', 'Session']].map(([id2, label]) => `<button type="button" data-bp-jump="${id2}">${label}</button>`).join('')}
+        ${[['bp-console', 'Console'], ['bp-inventory', 'Inventory'], ['bp-scoreboard', 'Scoreboard'], ['bp-player', 'Player'], ['bp-session', 'Session']].map(([id2, label]) => `<button type="button" data-bp-jump="${id2}">${label}</button>`).join('')}
       </nav>
 
-      <section class="bpanel bpanel--wide" id="bp-player" data-reveal="bp-player" style="--d:100ms">
-        <header class="bpanel__head"><h3>Player</h3><span class="bpanel__live"><i></i> live</span></header>
-        <div class="bkv bkv--3">
-          <div><span>Position</span><b id="bp-pos">${esc(pos)}</b></div>
-          <div><span>Dimension</span><b id="bp-dim">${esc(prettyGameId(d.dimension))}</b></div>
-          <div><span>Difficulty</span><b id="bp-diff">${esc(d.difficulty ? String(d.difficulty).charAt(0).toUpperCase() + String(d.difficulty).slice(1) : '—')}</b></div>
-          <div><span>Server brand</span><b id="bp-brand">${esc(d.serverBrand || '—')}</b></div>
-          <div><span>UUID</span><b id="bp-uuid" title="${esc(uuid)}">${uuid ? `${esc(uuid.slice(0, 8))}…${esc(uuid.slice(-4))}` : '—'}</b></div>
-          <div><span>Effects</span><b id="bp-effects">${effects.length ? effects.map((e) => `${esc(prettyGameId(e.name))}${e.amplifier ? ` ${roman(e.amplifier + 1)}` : ''}`).join(', ') : 'None'}</b></div>
+      <div class="bp-progress" aria-hidden="true"><i></i></div>
+
+      <div class="bpsheet" data-reveal="bp-sheet" style="--d:40ms">
+        <div class="bpsec" id="bp-console" data-reveal="bp-console" style="--d:60ms">
+          <div class="bpsec__head">
+            <span class="bpsec__num">01</span>
+            <h3>Console</h3>
+            <span class="bpsec__rule"></span>
+            <span class="bpsec__sub">Every line this bot prints — system, chat, sent and error output — streamed live from the server.</span>
+            <button class="bpanel__link" type="button" data-view="terminal">Open terminal ${icon('arrow')}</button>
+          </div>
+          <div class="bp-console" id="bp-console-lines"></div>
         </div>
-        <p class="bpanel__sub">Equipped</p>
-        <div class="player-gear">
-          <div class="player-gear__slot"><span>Held</span>${slotHtml(bot.heldItem, bot.version)}</div>
-          ${armor.map((it, i) => `<div class="player-gear__slot"><span>${['Helmet', 'Chestplate', 'Leggings', 'Boots'][i]}</span>${slotHtml(it, bot.version)}</div>`).join('')}
-          <div class="player-gear__slot"><span>Off-hand</span>${slotHtml(bot.offhand, bot.version)}</div>
+
+        <div class="bpsec" id="bp-inventory" data-reveal="bp-inventory" style="--d:120ms">
+          <div class="bpsec__head">
+            <span class="bpsec__num">02</span>
+            <h3>Inventory</h3>
+            <span class="bpsec__rule"></span>
+            <span class="bpsec__sub">All 36 slots of the Minecraft inventory — crafting grid, result, armour, off-hand, storage and hotbar.</span>
+            <button class="bpanel__link" type="button" data-action="inventory" data-id="${esc(bot.id)}">Open drawer ${icon('arrow')}</button>
+          </div>
+          <div id="bp-inv-root"></div>
         </div>
-      </section>
 
-      <section class="bpanel bpanel--wide" id="bp-console" data-reveal="bp-console" style="--d:140ms">
-        <header class="bpanel__head"><h3>Console</h3><span class="bpanel__live"><i></i> live</span><button class="bpanel__link" type="button" data-view="terminal">Open terminal ${icon('arrow')}</button></header>
-        <div class="bp-console" id="bp-console-lines"></div>
-      </section>
-
-      <section class="bpanel bpanel--wide" id="bp-inventory" data-reveal="bp-inventory" style="--d:180ms">
-        <header class="bpanel__head"><h3>Inventory</h3><span class="bpanel__count">${bot.inventoryUsed || 0}/36 slots</span><button class="bpanel__link" type="button" data-action="inventory" data-id="${esc(bot.id)}">Open drawer ${icon('arrow')}</button></header>
-        <div id="bp-inv-root"></div>
-      </section>
-
-      <section class="bpanel bpanel--wide" id="bp-scoreboard" data-reveal="bp-scoreboard" style="--d:220ms">
-        <header class="bpanel__head"><h3>Scoreboard</h3><span class="bpanel__count">sidebar objective</span></header>
-        ${bpScoreHtml(bot)}
-      </section>
-
-      <section class="bpanel bpanel--wide" id="bp-session" data-reveal="bp-session" style="--d:260ms">
-        <header class="bpanel__head"><h3>Session</h3><span class="bpanel__live"><i></i> ${st.label}</span></header>
-        <div class="bkv bkv--3">
-          <div><span>Auto-eat</span><b id="bp-ae">${bot.autoEat ? 'On' : 'Off'}</b></div>
-          <div><span>Anti-AFK</span><b id="bp-afk">${bot.antiAfk ? 'On' : 'Off'}</b></div>
-          <div><span>Auto-reconnect</span><b id="bp-reconnect">${bot.autoReconnect ? 'On' : 'Off'}</b></div>
-          <div><span>Auto-login</span><b id="bp-autologin">${bot.autoLogin ? 'On' : 'Off'}</b></div>
-          <div><span>Login attempts</span><b id="bp-attempts">${bot.loginAttempts || 0}/5</b></div>
-          <div><span>Version</span><b id="bp-ver">${esc(bot.version)}</b></div>
+        <div class="bpsec" id="bp-scoreboard" data-reveal="bp-scoreboard" style="--d:180ms">
+          <div class="bpsec__head">
+            <span class="bpsec__num">03</span>
+            <h3>Scoreboard</h3>
+            <span class="bpsec__rule"></span>
+            <span class="bpsec__sub">The live sidebar of the server this bot is riding on right now.</span>
+          </div>
+          <div id="bp-score-root">${bpScoreHtml(bot)}</div>
         </div>
-      </section>
+
+        <div class="bpsec" id="bp-player" data-reveal="bp-player" style="--d:240ms">
+          <div class="bpsec__head">
+            <span class="bpsec__num">04</span>
+            <h3>Player</h3>
+            <span class="bpsec__rule"></span>
+            <span class="bpsec__sub">Live vitals, world position, gear and identity of this bot.</span>
+          </div>
+          <div class="bkv bkv--3">
+            <div><span>Position</span><b id="bp-pos">${esc(pos)}</b></div>
+            <div><span>Dimension</span><b id="bp-dim">${esc(prettyGameId(d.dimension))}</b></div>
+            <div><span>Difficulty</span><b id="bp-diff">${esc(d.difficulty ? String(d.difficulty).charAt(0).toUpperCase() + String(d.difficulty).slice(1) : '—')}</b></div>
+            <div><span>Server brand</span><b id="bp-brand">${esc(d.serverBrand || '—')}</b></div>
+            <div><span>UUID</span><b id="bp-uuid" title="${esc(uuid)}">${uuid ? `${esc(uuid.slice(0, 8))}…${esc(uuid.slice(-4))}` : '—'}</b></div>
+            <div><span>Effects</span><b id="bp-effects">${effects.length ? effects.map((e) => `${esc(prettyGameId(e.name))}${e.amplifier ? ` ${roman(e.amplifier + 1)}` : ''}`).join(', ') : 'None'}</b></div>
+          </div>
+          <p class="bpanel__sub">Equipped</p>
+          <div class="player-gear">
+            <div class="player-gear__slot"><span>Held</span>${slotHtml(bot.heldItem, bot.version)}</div>
+            ${armor.map((it, i) => `<div class="player-gear__slot"><span>${['Helmet', 'Chestplate', 'Leggings', 'Boots'][i]}</span>${slotHtml(it, bot.version)}</div>`).join('')}
+            <div class="player-gear__slot"><span>Off-hand</span>${slotHtml(bot.offhand, bot.version)}</div>
+          </div>
+        </div>
+
+        <div class="bpsec" id="bp-session" data-reveal="bp-session" style="--d:320ms">
+          <div class="bpsec__head">
+            <span class="bpsec__num">05</span>
+            <h3>Session</h3>
+            <span class="bpsec__rule"></span>
+            <span class="bpsec__sub">Behaviour switches: auto-eat, anti-afk, reconnects, auto-login and friends.</span>
+          </div>
+          <div class="bkv bkv--3">
+            <div><span>Auto-eat</span><b id="bp-ae">${bot.autoEat ? 'On' : 'Off'}</b></div>
+            <div><span>Anti-AFK</span><b id="bp-afk">${bot.antiAfk ? 'On' : 'Off'}</b></div>
+            <div><span>Auto-reconnect</span><b id="bp-reconnect">${bot.autoReconnect ? 'On' : 'Off'}</b></div>
+            <div><span>Auto-login</span><b id="bp-autologin">${bot.autoLogin ? 'On' : 'Off'}</b></div>
+            <div><span>Login attempts</span><b id="bp-attempts">${bot.loginAttempts || 0}/5</b></div>
+            <div><span>Version</span><b id="bp-ver">${esc(bot.version)}</b></div>
+          </div>
+        </div>
+      </div>
 
       <form class="term-composer" id="bot-command-form" data-id="${esc(bot.id)}" autocomplete="off">
         <input id="bot-command-input" type="text" maxlength="250" placeholder="Message or /command for ${esc(bot.name)}…" aria-label="Command for ${esc(bot.name)}" spellcheck="false" />
@@ -1638,7 +1661,6 @@ function onBot(bot) {
   }
   if (state.consoleId === bot.id) updateDrawer(bot);
   if (state.view === 'bot' && state.botId === bot.id) patchBotPage(bot);
-  if (state.view === 'dashboard') updateDashScore(bot);
   renderSidebar();
 }
 
@@ -1939,3 +1961,15 @@ function applyRoute() {
   if (!raw) switchView('dashboard', false);
 }
 window.addEventListener('popstate', () => applyRoute());
+
+window.addEventListener('popstate', () => applyRoute());
+
+function botScrollTick() {
+  const bar = document.querySelector('#view .bp-progress i');
+  if (!bar) return;
+  const max = Math.max(document.documentElement.scrollHeight - window.innerHeight, 0);
+  const y = Math.min(Math.max(window.scrollY || 0, 0), max);
+  bar.style.width = max > 0 ? `${(y / max) * 100}%` : '0%';
+}
+window.addEventListener('scroll', botScrollTick, { passive: true });
+window.addEventListener('resize', botScrollTick);
