@@ -30,6 +30,33 @@ function getMineflayer() {
   if (!mineflayer) mineflayer = require('mineflayer');
   return mineflayer;
 }
+let mcProtocol = null;
+function getMcProtocol() {
+  if (!mcProtocol) mcProtocol = require('minecraft-protocol');
+  return mcProtocol;
+}
+
+// Velocity re-enters CONFIGURATION after login (backend transfer). While the
+// client is in that state, PLAY packets are a protocol violation — the server
+// answers with "An internal error occurred in your connection." mineflayer's
+// physics plugin keeps sending `position`, so drop non-configuration writes
+// until it is back in PLAY.
+const CONFIG_WRITES = new Set([
+  'configuration_acknowledged', 'select_known_packs', 'finish_configuration',
+  'custom_payload', 'keep_alive', 'pong', 'accept_code_of_conduct',
+  'resource_pack_receive', 'cookie_response', 'chat_session_update',
+]);
+function guardReconfigPackets(bot) {
+  const client = bot && bot._client;
+  if (!client || client._reconfigGuarded) return;
+  client._reconfigGuarded = true;
+  const states = getMcProtocol().states;
+  const write = client.write.bind(client);
+  client.write = (name, ...args) => {
+    if (client.state === states.CONFIGURATION && !CONFIG_WRITES.has(name)) return;
+    return write(name, ...args);
+  };
+}
 const proxyPool = require('./proxy-pool');
 
 // Light bot profile: fewer plugins, fewer chunks, lower RAM/CPU per bot.
@@ -755,6 +782,7 @@ class ManagedBot {
       return;
     }
     this.bot = bot;
+    guardReconfigPackets(bot);
 
     // Join watchdog — a silent hang should retry instead of sitting forever.
     this._watchdog = setTimeout(() => {
