@@ -6,6 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "node scripts/panel.js",
+    "setup": "node scripts/install.js",
+    "install:panel": "node scripts/install.js",
     "discord": "node discord-bridge.js",
     "start:all": "node index.js & node discord-bridge.js",
     "panel": "node scripts/panel.js",

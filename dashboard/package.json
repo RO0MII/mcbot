@@ -1,0 +1,9 @@
+{
+  "name": "mcbot-control-panel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Panel-only dependencies. No Discord bot, no dev tools — a fresh install is just mineflayer and what it needs.",
+  "dependencies": {
+    "mineflayer": "4.37.1"
+  }
+}

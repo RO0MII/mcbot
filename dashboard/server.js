@@ -23,9 +23,18 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const mineflayer = require('mineflayer');
+// mineflayer pulls in minecraft-data (hundreds of MB of version files). Load
+// it only when the first bot actually connects so an idle panel stays small.
+let mineflayer = null;
+function getMineflayer() {
+  if (!mineflayer) mineflayer = require('mineflayer');
+  return mineflayer;
+}
 const proxyPool = require('./proxy-pool');
 const { isLocalTarget } = proxyPool;
+
+// Light bot profile: fewer plugins, fewer chunks, lower RAM/CPU per bot.
+const LIGHT_OPTIONS = require('./bot-options');
 
 // Velocity rate-limits joins per IP ("Papyrus — You're connecting too quickly").
 // Ten bots retrying together therefore never get in. This gate spaces every
@@ -534,10 +543,33 @@ class ManagedBot {
     if (this._reswitchTimer) { clearTimeout(this._reswitchTimer); this._reswitchTimer = null; }
     if (this._afkClickTimer) { clearTimeout(this._afkClickTimer); this._afkClickTimer = null; }
     if (this._aliveTimer) { clearInterval(this._aliveTimer); this._aliveTimer = null; }
+    if (this._worldTimer) { clearInterval(this._worldTimer); this._worldTimer = null; }
   }
   _startAliveWatch() {
     if (this._aliveTimer) clearInterval(this._aliveTimer);
     this._aliveTimer = setInterval(() => this._checkAlive(), 10000);
+    if (this._worldTimer) clearInterval(this._worldTimer);
+    // Chunks are the biggest per-bot memory cost. Keep only the nine around
+    // the bot; physics still has the blocks under its feet.
+    this._worldTimer = setInterval(() => this._trimWorld(), 30000);
+  }
+
+  _trimWorld() {
+    const b = this.bot;
+    const world = b && b.world;
+    const cols = world && world.columns;
+    if (!cols) return;
+    const keys = Object.keys(cols);
+    if (keys.length <= 9) return;
+    const pos = (b.entity && b.entity.position) || { x: 0, z: 0 };
+    const cx = Math.floor(pos.x / 16);
+    const cz = Math.floor(pos.z / 16);
+    keys.map((k) => {
+      const [x, z] = k.split(',').map(Number);
+      return { x, z, d: (x - cx) ** 2 + (z - cz) ** 2 };
+    }).sort((a, c) => a.d - c.d).slice(9).forEach((c) => {
+      try { world.unloadColumn(c.x, c.z); } catch (_) {}
+    });
   }
 
   _checkAlive() {
@@ -713,6 +745,9 @@ class ManagedBot {
       hideErrors: true,
       logErrors: false,
       checkTimeoutInterval: 60000,
+      // Small render distance = far fewer chunks decoded and stored per bot.
+      viewDistance: LIGHT_OPTIONS.viewDistance,
+      plugins: LIGHT_OPTIONS.plugins,
     };
     if (this.version && this.version !== 'auto') opts.version = this.version;
     if (socket) {
@@ -733,7 +768,7 @@ class ManagedBot {
 
     let bot;
     try {
-      bot = mineflayer.createBot(opts);
+      bot = getMineflayer().createBot(opts);
     } catch (e) {
       this.lastError = e.message || String(e);
       this.addLog('err', `Could not create bot: ${this.lastError}`);

@@ -112,7 +112,7 @@ function itemIconUrl(name, version) { return '/api/icon/' + encodeURIComponent(a
 function itemImgHtml(item, version, cls) {
   cls = cls || 'slot__img';
   if (!item || !item.name) return '';
-  return '<img class="' + cls + '" src="' + itemIconUrl(item.name, version) + '" alt="' + esc(item.displayName || item.name) + '" loading="lazy" decoding="async" />';
+  return '<img class="' + cls + '" data-fallback="1" src="' + itemIconUrl(item.name, version) + '" alt="' + esc(item.displayName || item.name) + '" loading="lazy" decoding="async" />';
 }
 function invStripSig(bot) {
   const items = Array.isArray(bot.inventoryPreview) ? bot.inventoryPreview : [];
@@ -1224,7 +1224,8 @@ function mcSlot(it, version, opts) {
     inner = '<span class="mc-ghost">' + ARMOR_GHOSTS[opts.ghost] + '</span>';
   }
   if (selected) inner += '<i class="mc-slot__sel" aria-hidden="true"></i>';
-  return '<div class="' + cls + '"' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' + inner + '</div>';
+  const glyph = it ? esc(String(name || '?').trim().charAt(0).toUpperCase() || '?') : '';
+  return '<div class="' + cls + '"' + (tip ? ' title="' + esc(tip) + '"' : '') + (glyph ? ' data-icon="' + glyph + '"' : '') + '>' + inner + '</div>';
 }
 
 function inventoryHtml(inv, version, skeleton) {
@@ -1578,7 +1579,11 @@ function init() {
 
   document.addEventListener('error', (e) => {
     const t = e.target;
-    if (t && t.tagName === 'IMG' && t.closest('.bot-avatar, .pcard__skin, .board__av, .podium__av, .slot, .mini-slot, .mc-slot, .pxbot__av')) t.classList.add('is-missing');
+    if (t && t.tagName === 'IMG' && t.closest('.bot-avatar, .pcard__skin, .board__av, .podium__av, .slot, .mini-slot, .mc-slot, .pxbot__av')) {
+      t.classList.add('is-missing');
+      const slot = t.closest('.mc-slot');
+      if (slot) slot.classList.add('is-missing');
+    }
   }, true);
 
   const releaseTabLock = () => { state._tabLock = 0; state._tabTarget = null; };

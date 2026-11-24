@@ -36,6 +36,12 @@ function serviceExists() {
 function serviceActive() {
   return spawnSync('systemctl', ['is-active', '--quiet', SERVICE], { stdio: 'ignore' }).status === 0;
 }
+function startService() {
+  const r = spawnSync('systemctl', ['start', SERVICE], { stdio: 'inherit' });
+  if (r.status === 0) return true;
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return false;
+  return spawnSync('sudo', ['-n', 'systemctl', 'start', SERVICE], { stdio: 'inherit' }).status === 0;
+}
 
 function ping(attempt = 0) {
   return new Promise((resolve) => {
@@ -60,10 +66,9 @@ async function waitForPanel() {
   if (fs.existsSync('/run/systemd/system') && serviceExists()) {
     if (!serviceActive()) {
       console.log(`\n  Starting ${SERVICE}…\n`);
-      const started = spawnSync('systemctl', ['start', SERVICE], { stdio: 'inherit' });
-      if (started.status !== 0) {
+      if (!startService()) {
         console.error(`\n  Could not start the service. Run:\n    sudo systemctl start ${SERVICE}\n`);
-        process.exit(started.status || 1);
+        process.exit(1);
       }
     }
     const up = await waitForPanel();

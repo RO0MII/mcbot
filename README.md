@@ -40,13 +40,25 @@ It connects to any server, shows live in-game chat right in your terminal, and l
 
 ## 🚀 Installation
 
+**Panel only (fast — about 5s, no Discord/CLI deps):**
+
 ```bash
-# Clone the repo
 git clone https://github.com/RO0MII/mcbot.git
 cd mcbot
+npm run setup       # installs mineflayer only, rebuilds assets, starts port 80
+npm start           # panel already online — this just re-checks and prints the URL
+```
 
-# Install dependencies
-npm install
+`npm run setup` is safe to run again: it skips the download when dependencies
+are already present. Use `sudo npm run setup` if your user cannot write to
+`/etc/systemd/system`.
+
+**Full CLI + Discord bridge:**
+
+```bash
+npm install         # everything, including discord.js
+npm run bot         # terminal-only bot
+npm run discord     # Discord bridge
 ```
 
 ---
@@ -65,6 +77,11 @@ npm run dashboard  # run the panel in the foreground (no systemd)
 
 Set `DASHBOARD_PASSWORD` before exposing it to the internet. Runtime data
 (bot configs, icon/skin caches) stays in `dashboard/data/` and is git-ignored.
+
+Bots use a lightweight mineflayer profile: only the plugins needed for login,
+chat, inventory, vitals, scoreboard and movement are loaded, view distance is
+capped at 2, and distant chunks are dropped every 30s. This keeps RAM and CPU
+low when running a large fleet.
 
 Project page: **https://ro0mii.github.io/mcbot/**
 
