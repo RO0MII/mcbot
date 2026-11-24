@@ -248,7 +248,7 @@ async function enterApp() {
     state.loading = false;
     state.lastSyncAt = Date.now();
     if (changed) applyRoute();
-    else { renderSidebar(); patchAggregates(); }
+    else { renderView(); renderSidebar(); patchAggregates(); }
     scheduleSnapshot();
     connectSSE();
     startTick();
