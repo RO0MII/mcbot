@@ -24,6 +24,23 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const mineflayer = require('mineflayer');
+const proxyPool = require('./proxy-pool');
+
+// Velocity rate-limits joins per IP ("Papyrus — You're connecting too quickly").
+// Ten bots retrying together therefore never get in. This gate spaces every
+// connection attempt across the whole fleet.
+const CONNECT_GAP_MS = 3200;
+let gateNextAt = 0;
+let gateBlockedUntil = 0;
+function takeConnectSlot() {
+  const t = Date.now();
+  const at = Math.max(t, gateNextAt, gateBlockedUntil);
+  gateNextAt = at + CONNECT_GAP_MS + Math.floor(Math.random() * 1100);
+  return at - t;
+}
+function blockConnectGate(ms) {
+  gateBlockedUntil = Math.max(gateBlockedUntil, Date.now() + ms);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Settings
@@ -265,6 +282,13 @@ class ManagedBot {
     this.food = null;
     this.position = null;
     this.ping = null;
+    this.proxy = null;
+    this.proxySince = null;
+    this._retries = 0;
+    this._throttleHits = 0;
+    this._rateLimitedUntil = 0;
+    this._bannedUntil = 0;
+    this._gateTimer = null;
     this.loggedIn = false;
     this.loginAttempts = 0;
     this.switched = false;
@@ -395,6 +419,8 @@ class ManagedBot {
       food: this.food,
       position: this.position,
       ping: this.ping,
+      proxy: this.proxy,
+      proxySince: this.proxySince,
       loggedIn: this.loggedIn,
       loginAttempts: this.loginAttempts,
       switched: this.switched,
@@ -512,12 +538,17 @@ class ManagedBot {
   }
 
   stop(reason = 'Stopped by user') {
+    if (this._gateTimer) { clearTimeout(this._gateTimer); this._gateTimer = null; }
+    this._retries = 0;
+    this._rateLimitedUntil = 0;
     this.wanted = false;
     this._clearTimers();
     this._stopAfk();
     this._verifying = false;
     try { if (this.bot) this.bot.quit(reason); } catch (_) {}
     this.bot = null;
+    this.proxy = null;
+    this.proxySince = null;
     this.connectedAt = null;
     this.joinedAt = null;
     this.nextRetryAt = null;
@@ -538,7 +569,46 @@ class ManagedBot {
     this._later(() => this._connect(), 700);
   }
 
-  _connect() {
+  /**
+   * Choose an egress route, then dial. A proxy is opened *before* the client is
+   * created, so a dead proxy can never leave a bot hanging in "connecting" —
+   * we simply retry direct. Bots always come back.
+   */
+  _connect(slotTaken) {
+    if (!this.wanted) return;
+    if (this._gateTimer) { clearTimeout(this._gateTimer); this._gateTimer = null; }
+    if (!slotTaken) {
+      const wait = takeConnectSlot();
+      if (wait > 0) {
+        this.setStatus('connecting', 'Waiting for a connect slot…');
+        this._gateTimer = setTimeout(() => {
+          this._gateTimer = null;
+          if (this.wanted) this._connect(true);
+        }, wait);
+        return;
+      }
+    }
+    const gen = (this._gen = (this._gen || 0) + 1);
+    const px = this._directNext ? null : proxyPool.pick(this.id, this.name);
+    this._directNext = false;
+    if (!px) return this._connectNow(null);
+
+    this.setStatus('connecting', `Opening proxy ${px.ip}…`);
+    this.addLog('info', `Routing through ${px.ip}:${px.port} (${px.latency} ms)…`);
+    proxyPool.open(px, this.host, this.port, 9000).then((socket) => {
+      if (!this.wanted || gen !== this._gen) { try { socket.destroy(); } catch (_) {} return; }
+      proxyPool.reportOk(px);
+      this._connectNow(px, socket);
+    }).catch((err) => {
+      if (!this.wanted || gen !== this._gen) return;
+      proxyPool.reportFailure(px);
+      this.addLog('warn', `Proxy ${px.ip}:${px.port} unreachable (${clean(err && err.message || err, 80)}) — connecting direct.`);
+      this._directNext = true;
+      this._connectNow(null);
+    });
+  }
+
+  _connectNow(proxy, socket) {
     if (!this.wanted) return;
     this._clearTimers();
     this._stopAfk();
@@ -568,6 +638,17 @@ class ManagedBot {
       checkTimeoutInterval: 60000,
     };
     if (this.version && this.version !== 'auto') opts.version = this.version;
+    if (socket) {
+      // minecraft-protocol calls options.connect(client) for offline auth.
+      // Handing it a socket that already reached the server through SOCKS5
+      // skips DNS + TCP entirely on our side.
+      opts.connect = (client) => {
+        try { client.setSocket(socket); client.emit('connect'); }
+        catch (e) { try { client.emit('error', e); } catch (_) {} }
+      };
+    }
+    this.proxy = proxy ? { ip: proxy.ip, port: proxy.port, latency: proxy.latency, key: proxy.ip + ':' + proxy.port } : null;
+    this.proxySince = proxy ? now() : null;
 
     let bot;
     try {
@@ -604,8 +685,12 @@ class ManagedBot {
       this._firstSpawn = false;
       this.connectedAt = this.connectedAt || now();
       if (firstSpawn) this.joinedAt = now();
+      if (this.proxy) proxyPool.reportOk(this.proxy);
       if (this._watchdog) { clearTimeout(this._watchdog); this._watchdog = null; }
       this.nextRetryAt = null;
+      this._retries = 0;
+      this._throttleHits = 0;
+      this._rateLimitedUntil = 0;
       this.setStatus('online', 'Online');
       this.addLog('ok', `Joined ${this.host}:${this.port} as ${this.name}`);
 
@@ -673,6 +758,20 @@ class ManagedBot {
 
     bot.on('kicked', (reason) => {
       const r = clean(reason, 500);
+      if (/banned/i.test(r)) {
+        this._bannedUntil = now() + 15 * 60 * 1000;
+        blockConnectGate(120000);
+        this.addLog('err', 'This account/IP is banned by the server — retrying slowly. Appeal with the server staff.');
+      }
+      if (/slow down|connecting too quickly|too many connections|rate.?limit|throttl|too fast|try again later|too many login/i.test(r)) {
+        this._throttleHits = (this._throttleHits || 0) + 1;
+        const steps = [180000, 360000, 600000, 900000, 1200000];
+        const wait = steps[Math.min(this._throttleHits - 1, steps.length - 1)] + Math.floor(Math.random() * 45000);
+        this._rateLimitedUntil = now() + wait;
+        // Keep the entire fleet quiet too — every extra attempt extends the block.
+        blockConnectGate(wait);
+        this.addLog('warn', `Login throttled by the server — backing the fleet off for ${Math.round(wait / 60000)} min.`);
+      }
       this.setStatus('reconnecting', 'Kicked — reconnecting');
       if (/guard|bot verification|failed.*verif/i.test(r)) {
         this._guardKicked = true;
@@ -697,6 +796,7 @@ class ManagedBot {
       this._clearTimers();
       this._stopAfk();
       this._verifying = false;
+      if (this.proxy && !this.connectedAt) proxyPool.reportFailure(this.proxy);
       this.connectedAt = null;
       this.joinedAt = null;
       this.players = 0;
@@ -714,7 +814,19 @@ class ManagedBot {
       }
       this.addLog('warn', 'Disconnected.');
       this.setStatus('reconnecting', 'Disconnected');
-      this._scheduleReconnect(this._guardKicked ? 30000 : 5000);
+      this._retries = (this._retries || 0) + 1;
+      let delay;
+      if (this._bannedUntil && now() < this._bannedUntil) {
+        delay = (this._bannedUntil - now()) + Math.floor(Math.random() * 120000);
+      } else if (this._rateLimitedUntil && now() < this._rateLimitedUntil) {
+        // Politely wait out the limiter instead of feeding it.
+        delay = (this._rateLimitedUntil - now()) + Math.floor(Math.random() * 15000);
+      } else {
+        const steps = [8000, 15000, 30000, 60000, 120000, 300000];
+        delay = steps[Math.min(this._retries - 1, steps.length - 1)] + Math.floor(Math.random() * 4000);
+      }
+      if (this._guardKicked) delay = Math.max(delay, 30000);
+      this._scheduleReconnect(delay);
     });
   }
 
@@ -1497,6 +1609,7 @@ function stats() {
     players,
     avgUptime,
     masterOn: online + connecting > 0,
+    proxies: proxyPool.summary(),
   };
 }
 
@@ -1603,6 +1716,30 @@ async function handleApi(req, res, url) {
   if (!isAuthed(req)) return json(res, 401, { error: 'Not authenticated' });
 
   if (parts[1] === 'state' && method === 'GET') return json(res, 200, snapshot());
+
+  if (parts[1] === 'proxies' && method === 'GET') return json(res, 200, proxyPool.status());
+
+  if (parts[1] === 'proxies' && method === 'POST') {
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+    if (body.enabled != null) proxyPool.setEnabled(!!body.enabled);
+    if (body.maxPerIp != null) proxyPool.setMaxPerIp(body.maxPerIp);
+    if (body.reshuffle) proxyPool.reshuffle();
+    if (body.refresh) proxyPool.refresh(true).catch(() => {});
+    if (body.apply) {
+      // Rolling re-home: one bot at a time, seven seconds apart, so the fleet
+      // never dips all at once.
+      const targets = Array.from(manager.bots.values()).filter((b) => b.wanted);
+      targets.forEach((b, i) => setTimeout(() => {
+        proxyPool.release(b.id);
+        if (!b.wanted) return;
+        b.addLog('info', 'Re-homing through the proxy pool…');
+        b.restart();
+      }, i * 7000));
+      return json(res, 200, { ok: true, rolling: targets.length, status: proxyPool.status() });
+    }
+    return json(res, 200, proxyPool.status());
+  }
 
   if (parts[1] === 'logs' && method === 'GET') {
     const limit = Math.min(1200, Math.max(50, parseInt(url.searchParams.get('limit') || '600', 10)));
@@ -1944,6 +2081,16 @@ function boot() {
 
   if (!fs.existsSync(BOTS_FILE)) saveConfigs();
 
+  const firstBot = Array.from(manager.bots.values())[0];
+  const poolReady = proxyPool.init({
+    dataDir: DATA_DIR,
+    target: {
+      host: process.env.PROXY_TARGET_HOST || (firstBot && firstBot.host) || 'mc.hungrybirds.org',
+      port: parseInt(process.env.PROXY_TARGET_PORT || String((firstBot && firstBot.port) || 25565), 10),
+    },
+    log,
+  });
+
   const server = createServer();
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
@@ -1956,12 +2103,17 @@ function boot() {
   server.listen(PORT, HOST, () => {
     log(`\x1b[32mMCBot Control\x1b[0m listening on \x1b[36mhttp://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}\x1b[0m`);
     log(`${manager.bots.size} bot(s) and ${manager.groups.size} group(s) loaded from ${BOTS_FILE}`);
-    // Restore bots that were running before the dashboard restarted.
+    // Restore bots that were running before the dashboard restarted. Give the
+    // cached proxy pool a few seconds to re-validate first, so the very first
+    // connection already egresses through a proxy (9s cap either way).
     const restore = Array.from(manager.bots.values()).filter((b) => b.desiredOn);
-    if (restore.length) {
+    const kick = () => {
+      if (!restore.length) return;
       log(`Restoring ${restore.length} bot(s)…`);
-      restore.forEach((b, i) => setTimeout(() => { if (b.desiredOn) b.start(); }, 800 + i * 400));
-    }
+      restore.forEach((b, i) => setTimeout(() => { if (b.desiredOn) b.start(); }, 1000 + i * 1500));
+    };
+    Promise.race([poolReady || Promise.resolve(), new Promise((r) => setTimeout(r, 9000))])
+      .then(kick).catch(kick);
   });
 
   const shutdown = (signal) => {

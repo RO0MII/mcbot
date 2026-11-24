@@ -48,6 +48,7 @@ const VIEW_META = {
   dashboard: ['Command center', 'Everything your bots are doing, at a glance.'],
   servers: ['Servers', 'Bots grouped by the endpoint they connect to.'],
   scores: ['Scoreboard', 'Live sidebar scores, ranked across your fleet.'],
+  proxies: ['Proxies', 'Automatic SOCKS5 egress — five bots per IP.'],
   bot: ['Bot profile', 'Live console, inventory, player state and scoreboard.'],
 };
 
@@ -190,6 +191,9 @@ const state = {
   botId: null,
   logs: new Map(),
   invs: new Map(),
+  proxy: null,
+  _pxPoll: null,
+  _pxBusy: false,
   live: 'connecting',
   sse: null,
   lastEventAt: 0,
@@ -354,7 +358,7 @@ function updateChrome() {
 }
 function renderSidebar() {
   const stats = getStats();
-  const sig = [stats.masterOn, stats.online, stats.connecting, stats.servers].join('|');
+  const sig = [stats.masterOn, stats.online, stats.connecting, stats.servers, (stats.proxies && stats.proxies.total) || 0].join('|');
   if (sig === state._sidebarSig) return;
   state._sidebarSig = sig;
   const master = $('#master-toggle');
@@ -369,6 +373,11 @@ function renderSidebar() {
   const powerState = $('#power-state');
   if (powerState) powerState.textContent = stats.masterOn ? stats.online + ' online · ' + stats.connecting + ' connecting' : 'All systems idle';
   const count = $('#nav-servers-count'); if (count) count.textContent = String(stats.servers);
+  const pxCount = $('#nav-proxies-count');
+  if (pxCount) {
+    const px = stats.proxies || (state.proxy ? { total: state.proxy.total } : null);
+    pxCount.textContent = px && px.total ? String(px.total) : '0';
+  }
 }
 function renderAll() { updateChrome(); renderView(); renderSidebar(); patchAggregates(); }
 function patchAggregates() {
@@ -642,16 +651,104 @@ function patchBotCard(bot) {
 function scoreboardHtml(bot) {
   const sb = bot && bot.scoreboard;
   const items = (sb && Array.isArray(sb.items)) ? sb.items : [];
+  const title = (sb && sb.title) || 'Scoreboard';
+  const head = '<div class="sb__head"><span class="sb__title">' + icon('trophy') + '<b>' + esc(title) + '</b></span>'
+    + '<span class="sb__live' + (items.length ? '' : ' is-idle') + '"><i></i>' + (items.length ? 'live' : 'idle') + '</span></div>';
   if (!items.length) {
-    return '<div class="sb"><div class="sb__title">' + esc((sb && sb.title) || 'Scoreboard') + '</div><div class="sb__empty">No sidebar scoreboard visible right now.</div><div class="sb__foot"><span>sidebar</span><b>waiting</b></div></div>';
+    return '<div class="sb">' + head
+      + '<div class="sb__empty">' + icon('list') + '<span>No sidebar scoreboard visible right now.</span></div>'
+      + '<div class="sb__foot"><span>sidebar</span><b>waiting</b></div></div>';
   }
-  const rows = items.slice(0, 15).map((it, i) => {
+  const rows = items.slice(0, 15);
+  const nums = rows.map((it) => (Number.isFinite(it.amount) ? it.amount : 0));
+  const max = Math.max.apply(null, nums.concat([1]));
+  const body = rows.map((it, i) => {
     const label = it.nameLabel || it.label || it.name || '—';
-    const val = it.amountText || (Number.isFinite(it.amount) ? fmtCompact(it.amount) : '');
-    return '<div class="sb__row' + (i === 0 ? ' is-top' : '') + '"><span class="sb__idx">' + String(i + 1).padStart(2, '0') + '</span><span class="sb__label">' + esc(label) + '</span><span class="sb__dots"></span><span class="sb__val">' + esc(val) + '</span></div>';
+    const raw = it.amountText || (Number.isFinite(it.amount) ? fmtCompact(it.amount) : '');
+    const w = Math.max(6, Math.round(((nums[i] || 0) / max) * 100));
+    const rank = i + 1;
+    return '<div class="sb__row' + (rank === 1 ? ' is-top' : '') + (rank <= 3 ? ' is-p' + rank : '') + '" style="--w:' + w + '%">'
+      + '<span class="sb__rank">' + rank + '</span>'
+      + '<span class="sb__label">' + esc(label) + '</span>'
+      + '<span class="sb__bar"><i></i></span>'
+      + '<span class="sb__val">' + esc(raw) + '</span></div>';
   }).join('');
-  return '<div class="sb"><div class="sb__title">' + esc(sb.title || 'Scoreboard') + '</div><div class="sb__rows">' + rows + '</div><div class="sb__foot"><span>' + items.length + ' entries</span><b>live</b></div></div>';
+  return '<div class="sb">' + head
+    + '<div class="sb__rows">' + body + '</div>'
+    + '<div class="sb__foot"><span>' + rows.length + ' lines · sidebar</span><b>' + esc(title) + '</b></div></div>';
 }
+/* ── player card ── */
+function pingLevel(ping) {
+  if (ping == null || !Number.isFinite(ping)) return 0;
+  if (ping <= 80) return 5;
+  if (ping <= 150) return 4;
+  if (ping <= 300) return 3;
+  if (ping <= 500) return 2;
+  return 1;
+}
+function pingQuality(ping) {
+  if (ping == null || !Number.isFinite(ping)) return 'no signal';
+  if (ping <= 80) return 'excellent';
+  if (ping <= 150) return 'good';
+  if (ping <= 300) return 'fair';
+  return 'poor';
+}
+function pingBarsHtml(ping) {
+  const lvl = pingLevel(ping);
+  let out = '<span class="pingbars" data-lvl="' + lvl + '" data-q="' + pingQuality(ping).replace(/\s+/g, '-') + '" title="' + (ping == null ? 'No ping data yet' : ping + ' ms') + '">';
+  for (let i = 1; i <= 5; i++) out += '<i class="' + (i <= lvl ? 'is-on' : '') + '" style="height:' + (5 + i * 3) + 'px"></i>';
+  return out + '</span>';
+}
+function proxyChipHtml(bot, cls) {
+  const p = bot && bot.proxy;
+  if (p) return '<span class="pxchip is-on' + (cls ? ' ' + cls : '') + '" title="Egress ' + esc(p.ip) + ':' + p.port + '">' + icon('globe') + '<b>' + esc(p.ip) + '</b><span>:' + p.port + '</span></span>';
+  return '<span class="pxchip' + (cls ? ' ' + cls : '') + '" title="No proxy — connecting direct">' + icon('globe') + '<b>Direct</b><span>no proxy</span></span>';
+}
+function playerCardHtml(bot) {
+  const st = statusMeta(bot);
+  const d = bot.detail || {};
+  const ping = bot.ping;
+  const p = bot.position;
+  const pos = p && Number.isFinite(p.x) ? Math.round(p.x) + ' ' + Math.round(p.y) + ' ' + Math.round(p.z) : '';
+  const routeSig = bot.proxy ? bot.proxy.ip + ':' + bot.proxy.port : 'direct';
+  const tags = '<span class="ptag">' + icon('user') + ' ' + esc(d.gamemode || 'Survival') + '</span>'
+    + '<span class="ptag">' + icon('pin') + ' ' + esc(d.dimension || 'Overworld') + '</span>'
+    + (pos ? '<span class="ptag ptag--mono">' + icon('cube') + ' ' + esc(pos) + '</span>' : '')
+    + '<span class="ptag ' + (bot.loggedIn ? 'is-good' : '') + '" data-f="hero-tag">' + icon('shield') + ' ' + (bot.loggedIn ? 'Logged in' : 'Auto login') + '</span>';
+  return '<section class="pcard' + (bot.status === 'online' ? ' is-online' : '') + '">'
+    + '<div class="pcard__skin">'
+    + '<div class="pcard__stage"><span class="pcard__halo" aria-hidden="true"></span><span class="avatar-initial">' + esc(initial(bot.name)) + '</span>'
+    + '<img class="pcard__img" src="/api/skin/' + encodeURIComponent(bot.name) + '?kind=body&size=220" alt="" loading="lazy" decoding="async" /></div>'
+    + '<span class="status-dot ' + st.dot + '" data-f="hero-dot"></span>'
+    + '</div>'
+    + '<div class="pcard__main">'
+    + '<span class="pcard__eyebrow"><i></i>Player</span>'
+    + '<h2 class="pcard__name">' + esc(bot.name) + '<span class="pill ' + st.pill + '" data-f="hero-pill"><i></i>' + st.label + '</span></h2>'
+    + '<p class="pcard__server" data-f="hero-login">' + esc(bot.host) + ':' + bot.port + ' · v' + esc(bot.version) + ' · ' + (bot.loggedIn ? 'Logged in' : 'Auto login pending') + '</p>'
+    + '<div class="bot-tags">' + tags + '</div>'
+    + '</div>'
+    + '<div class="pcard__side">'
+    + '<div class="pcard__stat">'
+    + '<span class="pcard__label">Ping</span>'
+    + '<div class="pcard__pingrow">' + pingBarsHtml(ping) + '<b data-f="pc-ping">' + (ping == null ? '—' : ping + '<small>ms</small>') + '</b></div>'
+    + '<span class="pcard__hint" data-f="pc-quality">' + pingQuality(ping) + '</span>'
+    + '</div>'
+    + '<div class="pcard__stat">'
+    + '<span class="pcard__label">Route</span>'
+    + '<div class="pcard__route" data-f="pc-route" data-sig="' + esc(routeSig) + '">' + proxyChipHtml(bot) + '</div>'
+    + '<span class="pcard__hint">' + (bot.proxy ? 'proxied egress' : 'direct connection') + '</span>'
+    + '</div>'
+    + '</div>'
+    + '<div class="pcard__actions">'
+    + '<button class="btn btn-ghost btn-sm" data-action="toggle" data-id="' + esc(bot.id) + '">' + icon(isActive(bot) ? 'stop' : 'play') + '<span>' + (isActive(bot) ? 'Stop' : 'Start') + '</span></button>'
+    + '<button class="btn btn-ghost btn-sm" data-action="restart" data-id="' + esc(bot.id) + '">' + icon('restart') + '<span>Restart</span></button>'
+    + '<button class="btn btn-ghost btn-sm" data-action="auto-eat" data-id="' + esc(bot.id) + '">' + icon('zap') + '<span>Auto-eat</span></button>'
+    + '<span class="pcard__spacer"></span>'
+    + '<button class="btn btn-primary btn-sm" data-action="add">' + icon('plus') + '<span>New bot</span></button>'
+    + '</div>'
+    + '</section>';
+}
+
 function botPageHtml() {
   const bot = findBot(state.botId) || (state.bots || [])[0];
   if (!bot) return '<div class="empty"><div class="empty__art">' + icon('cube') + '</div><h3>No bot selected</h3><p>Go back to the dashboard and pick a bot.</p><button class="btn btn-primary" data-view="dashboard">' + icon('grid') + '<span>Back to overview</span></button></div>';
@@ -672,19 +769,7 @@ function botPageHtml() {
     '<div class="bp-metric' + (m.bad ? ' is-bad' : (m.warn ? ' is-warn' : '')) + '" data-f="metric-' + m.key + '"><span>' + icon(m.icon) + ' ' + m.label + '</span><b data-f="m-' + m.key + '"' + (m.key === 'uptime' ? ' data-uptime="' + m.uptime + '"' : '') + '>' + m.value + '</b><em>' + m.label + '</em></div>'
   ).join('');
   return '<div class="bp-progress" aria-hidden="true"><i></i></div>'
-    + '<section class="bot-hero">'
-    + '<div class="bot-hero__avatar"><span class="avatar-initial">' + esc(initial(bot.name)) + '</span><img src="/api/skin/' + encodeURIComponent(bot.name) + '?kind=body&size=200" alt="" loading="lazy" decoding="async" /><span class="status-dot ' + st.dot + '" data-f="hero-dot"></span></div>'
-    + '<div class="bot-hero__id"><span class="bot-hero__eyebrow">Bot profile</span><h2>' + esc(bot.name) + ' <span class="pill ' + st.pill + '" data-f="hero-pill"><i></i>' + st.label + '</span></h2>'
-    + '<p data-f="hero-login">' + esc(bot.host) + ':' + bot.port + ' · v' + esc(bot.version) + ' · ' + (bot.loggedIn ? 'Logged in' : 'Auto login pending') + '</p>'
-    + '<div class="bot-tags"><span class="ptag">' + icon('user') + ' ' + esc(d.gamemode || 'Survival') + '</span><span class="ptag">' + icon('pin') + ' ' + esc(d.dimension || 'Overworld') + '</span><span class="ptag ' + (bot.loggedIn ? 'is-good' : '') + '" data-f="hero-tag">' + icon('shield') + ' ' + (bot.loggedIn ? 'Logged in' : 'Auto login') + '</span></div>'
-    + '</div>'
-    + '<div class="bot-hero__actions">'
-    + '<button class="btn btn-ghost btn-sm" data-action="toggle" data-id="' + esc(bot.id) + '">' + icon(isActive(bot) ? 'stop' : 'play') + '<span>' + (isActive(bot) ? 'Stop' : 'Start') + '</span></button>'
-    + '<button class="btn btn-ghost btn-sm" data-action="restart" data-id="' + esc(bot.id) + '">' + icon('restart') + '<span>Restart</span></button>'
-    + '<button class="btn btn-ghost btn-sm" data-action="auto-eat" data-id="' + esc(bot.id) + '">' + icon('zap') + '<span>Auto-eat</span></button>'
-    + '<button class="btn btn-primary btn-sm" data-action="add">' + icon('plus') + '<span>New bot</span></button>'
-    + '</div>'
-    + '</section>'
+    + playerCardHtml(bot)
     + '<div class="bp-stats">' + metricsHtml + '</div>'
     + '<div class="bp-tabs" role="tablist">'
     + '<button class="is-active" data-bp-scroll="bp-console">' + icon('terminal') + '<span>Console</span></button>'
@@ -727,6 +812,23 @@ function patchBotPage(bot) {
   setText('[data-f="m-health"]', hp + '/20');
   setText('[data-f="m-food"]', food + '/20');
   setText('[data-f="m-ping"]', bot.ping == null ? '—' : bot.ping + ' ms');
+  const pcPing = root.querySelector('[data-f="pc-ping"]');
+  if (pcPing) { const html = bot.ping == null ? '—' : bot.ping + '<small>ms</small>'; if (pcPing.innerHTML !== html) pcPing.innerHTML = html; }
+  const bars = root.querySelector('.pcard .pingbars');
+  if (bars) {
+    const lvl = pingLevel(bot.ping);
+    if (bars.getAttribute('data-lvl') !== String(lvl)) {
+      bars.setAttribute('data-lvl', String(lvl));
+      bars.setAttribute('data-q', pingQuality(bot.ping).replace(/\s+/g, '-'));
+      Array.prototype.forEach.call(bars.children, (el, i) => el.classList.toggle('is-on', i < lvl));
+    }
+  }
+  const pq = root.querySelector('[data-f="pc-quality"]'); if (pq) pq.textContent = pingQuality(bot.ping);
+  const route = root.querySelector('[data-f="pc-route"]');
+  if (route) {
+    const sig = bot.proxy ? bot.proxy.ip + ':' + bot.proxy.port : 'direct';
+    if (route.getAttribute('data-sig') !== sig) { route.setAttribute('data-sig', sig); route.innerHTML = proxyChipHtml(bot); }
+  }
   setText('[data-f="m-players"]', bot.players == null ? '—' : bot.players);
   setText('[data-f="m-xp"]', xp.level || 0);
   const mh = root.querySelector('[data-f="metric-health"]'); if (mh) mh.classList.toggle('is-bad', hp <= 6);
@@ -776,11 +878,114 @@ function scoresHtml() {
     + (cards ? '<div class="bot-grid">' + cards + '</div>' : '<div class="empty"><div class="empty__art">' + icon('trophy') + '</div><h3>No scoreboards yet</h3><p>Sidebar scores show up here as soon as a bot is in-game.</p></div>');
 }
 
+/* ── proxies view ── */
+function pxLatencyClass(ms) { return ms <= 700 ? 'is-good' : ms <= 1500 ? 'is-ok' : 'is-slow'; }
+function pxSig(p) {
+  if (!p) return 'none';
+  return [p.enabled, p.total, p.assigned, p.refreshing, p.maxPerIp, p.proxies.map((x) => x.key + ':' + x.bots.length).join(',')].join('|');
+}
+function pxStat(label, value, hint, cls) {
+  return '<div class="pxstat' + (cls ? ' ' + cls : '') + '"><span>' + esc(label) + '</span><b>' + esc(value) + '</b><em>' + esc(hint) + '</em></div>';
+}
+function pxCardHtml(x, max) {
+  const pct = Math.min(100, Math.round((x.bots.length / Math.max(1, max)) * 100));
+  const bots = x.bots.length
+    ? x.bots.map((n) => '<span class="pxbot"><span class="pxbot__av">' + esc(initial(n)) + '<img src="/api/skin/' + encodeURIComponent(n) + '?kind=head&size=48" alt="" loading="lazy" decoding="async" /></span><i>' + esc(n) + '</i></span>').join('')
+    : '<span class="pxbot pxbot--free">no bots pinned</span>';
+  return '<article class="pxcard">'
+    + '<header class="pxcard__top"><span class="pxcard__ip"><b>' + esc(x.ip) + '</b><span>:' + x.port + '</span></span>'
+    + '<span class="pxpill ' + pxLatencyClass(x.latency) + '">' + x.latency + ' ms</span></header>'
+    + '<div class="pxcard__load"><i style="width:' + pct + '%"></i><span>' + x.bots.length + ' / ' + max + ' bots</span></div>'
+    + '<div class="pxcard__bots">' + bots + '</div>'
+    + '<footer class="pxcard__foot"><span>' + icon('shield') + (x.source === 'cached' ? 'cached' : 'verified') + '</span><span>' + x.fails + ' fails</span></footer>'
+    + '</article>';
+}
+function proxyBodyHtml(p) {
+  if (!p) return '<div class="pxgrid">' + new Array(3).fill('<div class="pxcard is-skel"><span class="sk sk-line"></span><span class="sk sk-line sk-sm"></span><span class="sk sk-block"></span></div>').join('') + '</div>';
+  const inUse = p.proxies.filter((x) => x.bots.length);
+  const spare = p.proxies.filter((x) => !x.bots.length);
+  const routed = inUse.reduce((a, x) => a + x.bots.length, 0);
+  const avg = inUse.length ? Math.round(inUse.reduce((a, x) => a + x.latency, 0) / inUse.length) : 0;
+  const stats = '<div class="pxstats">'
+    + pxStat('Pool', String(p.total), p.total ? 'live SOCKS5 routes' : 'none yet', 'is-brand')
+    + pxStat('In use', String(inUse.length), 'egress addresses', 'is-gold')
+    + pxStat('Routed bots', String(routed), 'pinned to an IP')
+    + pxStat('Avg latency', avg ? avg + ' ms' : '—', 'on active routes')
+    + pxStat('Max per IP', String(p.maxPerIp), 'bots per address')
+    + '</div>';
+  const refreshNote = p.refreshing
+    ? '<span class="pxspin"><i></i>testing routes…</span>'
+    : '<span class="pxmeta">' + (p.lastRefresh ? 'swept ' + fmtDuration(Date.now() - p.lastRefresh) + ' ago' : 'not swept yet') + '</span>';
+  const controls = '<div class="pxcontrols">'
+    + '<div class="pxcontrols__state"><span class="switch' + (p.enabled ? ' is-on' : '') + '" role="switch" aria-checked="' + (p.enabled ? 'true' : 'false') + '" data-action="proxy-toggle" tabindex="0"><span class="switch__track"><span class="switch__thumb"></span></span><span class="switch__label">' + (p.enabled ? 'On' : 'Off') + '</span></span>'
+    + '<div><b>Automatic proxy pool</b><span>Fetch · verify · pin · fail over</span></div></div>'
+    + '<div class="pxcontrols__right">' + refreshNote
+    + '<label class="pxmax">max / IP <input id="px-max" type="number" min="1" max="50" value="' + p.maxPerIp + '" inputmode="numeric" /></label>'
+    + '<button class="btn btn-ghost btn-sm" data-action="proxy-reshuffle">' + icon('restart') + '<span>Reshuffle</span></button>'
+    + '</div></div>';
+  const active = inUse.length
+    ? '<div class="pxgrid">' + inUse.map((x) => pxCardHtml(x, p.maxPerIp)).join('') + '</div>'
+    : '<div class="pxempty">' + icon('globe') + '<div><b>No bots are proxied yet</b><span>' + (p.total ? 'Hit “Apply to fleet” to re-home them one at a time, or they pick a route on the next reconnect.' : 'The pool is still filling — give it a minute.') + '</span></div></div>';
+  const list = spare.length
+    ? '<section class="pxpool"><header class="pxpool__head"><h3>' + icon('list') + 'Spare routes</h3><span>' + spare.length + ' ready</span></header>'
+      + '<div class="pxpool__list">' + spare.slice(0, 60).map((x) =>
+        '<div class="pxrow"><span class="pxrow__ip">' + esc(x.ip) + '<span>:' + x.port + '</span></span>'
+        + '<span class="pxrow__bar"><i style="width:' + Math.max(8, Math.min(100, Math.round((1 - Math.min(x.latency, 2500) / 2500) * 100))) + '%"></i></span>'
+        + '<span class="pxpill ' + pxLatencyClass(x.latency) + '">' + x.latency + ' ms</span>'
+        + '<span class="pxrow__free">free</span></div>').join('') + '</div>'
+      + (spare.length > 60 ? '<div class="pxpool__more">+' + (spare.length - 60) + ' more validated routes</div>' : '')
+      + '</section>'
+    : '';
+  return stats + controls + active + list;
+}
+function proxiesHtml() {
+  const p = state.proxy;
+  return '<div class="page-head"><div><span class="eyebrow"><i></i> Egress</span><h2>Proxies</h2>'
+    + '<p>Bots are pinned to a SOCKS5 address — five per IP — and fall back to a direct connection if a route dies.</p></div>'
+    + '<div class="page-head__actions">'
+    + '<button class="btn btn-ghost" data-action="proxy-refresh">' + icon('restart') + '<span>Refresh pool</span></button>'
+    + '<button class="btn btn-primary" data-action="proxy-apply">' + icon('zap') + '<span>Apply to fleet</span></button>'
+    + '</div></div>'
+    + '<div id="px-root" data-sig="' + esc(pxSig(p)) + '">' + proxyBodyHtml(p) + '</div>';
+}
+function patchProxies() {
+  const root = document.getElementById('px-root');
+  const p = state.proxy;
+  if (!root || !p) return;
+  const sig = pxSig(p);
+  if (root.getAttribute('data-sig') === sig) return;
+  root.setAttribute('data-sig', sig);
+  root.innerHTML = proxyBodyHtml(p);
+}
+async function loadProxies(force) {
+  if (state._pxBusy && !force) return;
+  state._pxBusy = true;
+  try {
+    const d = await api('/api/proxies');
+    state.proxy = d;
+    if (state.view === 'proxies') patchProxies();
+  } catch (e) {
+    if (state.view === 'proxies') toast('err', 'Proxy pool', e.message);
+  } finally { state._pxBusy = false; }
+}
+function proxyPost(body, title, msg) {
+  return api('/api/proxies', { method: 'POST', body: body }).then((d) => {
+    if (d && d.status) state.proxy = d.status; else state.proxy = d;
+    patchProxies();
+    if (title) toast('ok', title, msg || '');
+    setTimeout(() => loadProxies(true), 900);
+    if (body && body.refresh) setTimeout(() => loadProxies(true), 12000);
+    return d;
+  });
+}
+
 /* ── views ── */
 function renderView() {
+  if (state._pxPoll) { clearInterval(state._pxPoll); state._pxPoll = null; }
   if (state.view === 'bot') $('#view').innerHTML = botPageHtml();
   else if (state.view === 'servers') $('#view').innerHTML = serversHtml();
   else if (state.view === 'scores') $('#view').innerHTML = scoresHtml();
+  else if (state.view === 'proxies') $('#view').innerHTML = proxiesHtml();
   else $('#view').innerHTML = dashboardHtml();
   afterRender();
 }
@@ -789,6 +994,10 @@ function afterRender() {
   else if (state.view === 'bot') {
     bindSectionSpy();
     if (state.botId) { renderBotConsole(); renderBotInventory(); }
+  }
+  else if (state.view === 'proxies') {
+    loadProxies(true);
+    state._pxPoll = setInterval(() => { if (state.view === 'proxies') loadProxies(false); }, 6000);
   }
 }
 function updateUptimes() {
@@ -799,7 +1008,7 @@ function updateUptimes() {
 }
 function switchView(view, push) {
   if (push === undefined) push = true;
-  if (!['dashboard', 'servers', 'scores', 'bot'].includes(view)) return;
+  if (!['dashboard', 'servers', 'scores', 'proxies', 'bot'].includes(view)) return;
   if (state.view === view && view !== 'bot') return;
   state.view = view;
   if (view === 'bot') hydrateLastBot();
@@ -816,6 +1025,7 @@ function applyRoute() {
   if (parts[0] === 'bot' && parts[1]) { state.view = 'bot'; state.botId = parts[1]; }
   else if (parts[0] === 'servers') { state.view = 'servers'; state.botId = null; }
   else if (parts[0] === 'scores') { state.view = 'scores'; state.botId = null; }
+  else if (parts[0] === 'proxies') { state.view = 'proxies'; state.botId = null; }
   else { state.view = 'dashboard'; state.botId = null; }
   if (state.bots.length) state.loading = false;
   if (state.view === 'bot') hydrateLastBot();
@@ -932,36 +1142,80 @@ async function loadBotLogs(id) {
 }
 
 /* ── inventory ── */
+const ARMOR_GHOSTS = {
+  helmet: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 10.4a7.4 7.4 0 0 1 14.8 0v3.8a2.2 2.2 0 0 1-2.2 2.2h-1.1v-2.6H7.9v2.6H6.8a2.2 2.2 0 0 1-2.2-2.2z"/></svg>',
+  chest: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.6 3.1 12 5l3.4-1.9 4.7 3.3-1.9 3.4-1.7-.9V21H7.5V9l-1.7.9L4 6.5z"/></svg>',
+  legs: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 3.4h10.8v4.2H6.6zM7.1 9h4.1v12H7.1zM12.8 9h4.1v12h-4.1z"/></svg>',
+  boots: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 4h4.1v9.4h2.3V17H6.4zM13.4 4h4.1v13h-4.1z"/></svg>',
+};
+
+/* A slot that looks like a Minecraft slot: inset well, square, bevel. */
+function mcSlot(it, version, opts) {
+  opts = opts || {};
+  const selected = !!opts.selected;
+  const cls = 'mc-slot' + (opts.cls ? ' ' + opts.cls : '') + (it ? '' : ' is-empty') + (selected ? ' is-selected' : '');
+  const name = it ? (it.displayName || it.name) : '';
+  const tip = it ? name + (it.count > 1 ? ' ×' + it.count : '') : (opts.empty || '');
+  let inner = '';
+  if (it) {
+    inner += itemImgHtml(it, version, 'mc-item');
+    if (it.count > 1) inner += '<i class="mc-slot__count">' + it.count + '</i>';
+    if (it.maxDurability > 1 && it.durabilityUsed > 0) {
+      const left = Math.max(0, Math.min(1, 1 - it.durabilityUsed / it.maxDurability));
+      inner += '<i class="mc-slot__dura" style="width:' + Math.round(left * 100) + '%;background:hsl(' + Math.round(left * 120) + ',85%,52%)"></i>';
+    }
+  } else if (opts.ghost && ARMOR_GHOSTS[opts.ghost]) {
+    inner = '<span class="mc-ghost">' + ARMOR_GHOSTS[opts.ghost] + '</span>';
+  }
+  if (selected) inner += '<i class="mc-slot__sel" aria-hidden="true"></i>';
+  return '<div class="' + cls + '"' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' + inner + '</div>';
+}
+
+function inventoryHtml(inv, version, skeleton) {
+  const slot = (it, opts) => mcSlot(it || null, version, opts);
+  const craft = (inv && Array.isArray(inv.craft)) ? inv.craft : [null, null, null, null];
+  const hotbar = (inv && Array.isArray(inv.hotbar)) ? inv.hotbar : new Array(9).fill(null);
+  const main = (inv && Array.isArray(inv.main)) ? inv.main : new Array(27).fill(null);
+  const armor = (inv && Array.isArray(inv.armor)) ? inv.armor : [null, null, null, null];
+  const sel = inv ? (Number.isInteger(inv.selected) ? inv.selected : 0) : -1;
+  const used = inv ? (inv.used || 0) : 0;
+  const names = ['helmet', 'chest', 'legs', 'boots'];
+  const label = (t) => '<span class="mcinv__label">' + esc(t) + '</span>';
+
+  const head = '<div class="mcinv__head"><div class="mcinv__title">' + icon('layers') + '<b>Inventory</b>'
+    + '<span>' + (skeleton ? 'loading…' : used + ' / 36 used') + '</span></div>'
+    + '<div class="mcinv__legend"><i></i>selected hotbar</div></div>';
+
+  const top = '<div class="mcinv__top">'
+    + '<div class="mcinv__block mcinv__block--craft">' + label('Crafting')
+    + '<div class="mcinv__craftrow"><div class="mcinv__cgrid">' + craft.map((it) => slot(it)).join('') + '</div>'
+    + '<span class="mcinv__arrow">' + icon('arrow') + '</span>'
+    + '<div class="mcinv__cres">' + slot(inv ? inv.craftResult : null) + '</div></div></div>'
+    + '<div class="mcinv__block mcinv__block--armor">' + label('Armour')
+    + '<div class="mcinv__acol">' + armor.map((it, i) => slot(it, { cls: 'mc-slot--armor', ghost: names[i], empty: names[i] })).join('') + '</div></div>'
+    + '</div>';
+
+  const body = '<div class="mcinv__block mcinv__block--main">' + label('Backpack')
+    + '<div class="mcinv__grid">' + main.map((it) => slot(it)).join('') + '</div></div>';
+
+  const bottom = '<div class="mcinv__bottom">'
+    + '<div class="mcinv__hot">' + label('Hotbar')
+    + '<div class="mcinv__hotgrid">' + hotbar.map((it, i) => slot(it, { selected: i === sel })).join('') + '</div></div>'
+    + '<div class="mcinv__off">' + label('Off-hand')
+    + '<div class="mcinv__offslot">' + slot(inv ? inv.offhand : null, { cls: 'mc-slot--off', empty: 'Off-hand' }) + '</div></div>'
+    + '</div>';
+
+  const foot = '<div class="mcinv__foot"><span>' + icon('cube') + (skeleton ? 'syncing slots' : (36 - used) + ' free slots') + '</span>'
+    + '<span>' + (skeleton ? '' : 'capacity 36') + '</span></div>';
+
+  return '<div class="mcinv' + (skeleton ? ' is-skel' : '') + '">' + head + top + body + bottom + foot + '</div>';
+}
+
 function renderBotInventory() {
   const root = $('#bp-inv-root'); if (!root) return;
   const inv = state.invs.get(state.botId) || null;
-  if (!inv) {
-    const cell = '<span class="sk sk-cell"></span>';
-    root.innerHTML = '<div class="inv"><div class="inv__side">'
-      + '<div class="inv-block"><div class="inv-block__label">Crafting</div><div class="inv-craft"><div class="inv-craft__grid">' + cell.repeat(4) + '</div><div class="inv-craft__result">' + cell + '</div></div></div>'
-      + '<div class="inv-block"><div class="inv-block__label">Armour</div><div class="inv-armor">' + cell.repeat(4) + '</div></div>'
-      + '<div class="inv-block"><div class="inv-block__label">Off-hand</div><div class="inv-block__off">' + cell + '</div></div>'
-      + '</div><div class="inv__main"><div class="inv-block__label">Hotbar</div><div class="inv-grid inv-grid--hotbar">' + cell.repeat(9) + '</div>'
-      + '<div class="inv-block__label">Storage</div><div class="inv-grid inv-grid--storage">' + cell.repeat(27) + '</div></div></div>';
-    return;
-  }
-  const version = (findBot(state.botId) || {}).version || '1.20.1';
-  const slotHtml = (it, selected) => {
-    let cls = 'slot'; if (!it) cls += ' is-empty'; if (selected) cls += ' is-selected';
-    const inner = itemImgHtml(it, version) + (it && it.count > 1 ? '<i class="slot__count">x' + it.count + '</i>' : '');
-    return '<div class="' + cls + '">' + inner + '</div>';
-  };
-  const craftGrid = (arr) => '<div class="inv-craft__grid">' + (arr || []).map((it, i) => slotHtml(it, i === 0)).join('') + '</div>';
-  root.innerHTML = '<div class="inv"><div class="inv__side">'
-    + '<div class="inv-block"><div class="inv-block__label">Crafting</div><div class="inv-craft">' + craftGrid(inv.craft) + '<div class="inv-craft__result">' + slotHtml(inv.craftResult, true) + '</div></div></div>'
-    + '<div class="inv-block"><div class="inv-block__label">Armour</div><div class="inv-armor">' + (inv.armor || []).map((it) => slotHtml(it, false)).join('') + '</div></div>'
-    + '<div class="inv-block"><div class="inv-block__label">Off-hand</div><div class="inv-block__off">' + slotHtml(inv.offhand, false) + '</div></div>'
-    + '</div><div class="inv__main">'
-    + '<div class="inv-block__label">Hotbar · selected ' + (inv.selected || 0) + '</div>'
-    + '<div class="inv-grid inv-grid--hotbar">' + (inv.hotbar || []).map((it, i) => slotHtml(it, i === (inv.selected || 0))).join('') + '</div>'
-    + '<div class="inv-block__label">Storage</div>'
-    + '<div class="inv-grid inv-grid--storage">' + (inv.main || []).map((it) => slotHtml(it, false)).join('') + '</div>'
-    + '</div></div>';
+  const bot = findBot(state.botId) || {};
+  root.innerHTML = inventoryHtml(inv, bot.version || '1.20.1', !inv);
 }
 async function loadBotInventory(id) {
   if (!id || state._inflight.inv[id]) return;
@@ -990,6 +1244,10 @@ function handleAction(action, el) {
     if (action === 'bot-page' && id) { state.botId = id; switchView('bot'); return Promise.resolve(); }
     if (action === 'add') { openAddBot(); return Promise.resolve(); }
     if (action === 'master') { toggleMaster(); return Promise.resolve(); }
+    if (action === 'proxy-refresh') return proxyPost({ refresh: true }, 'Refreshing pool', 'Testing SOCKS5 routes — this takes about a minute.');
+    if (action === 'proxy-reshuffle') return proxyPost({ reshuffle: true }, 'Assignments cleared', 'Bots pick a new IP on their next reconnect.');
+    if (action === 'proxy-toggle') { const on = !(state.proxy && state.proxy.enabled); return proxyPost({ enabled: on }, 'Proxy pool ' + (on ? 'on' : 'off'), on ? 'New connections route through the pool.' : 'Direct connections only from now on.'); }
+    if (action === 'proxy-apply') return proxyPost({ apply: true }, 'Re-homing fleet', 'One bot every 7 seconds, so the fleet never drops at once.');
     if (action === 'refresh') { return api('/api/state').then((d) => { state.bots = Array.isArray(d.bots) ? d.bots : []; state.stats = d.stats || {}; renderAll(); toast('ok', 'Refreshed', 'State synced.'); }).catch((e) => toast('err', 'Refresh failed', e.message)); }
     return Promise.resolve();
   };
@@ -1135,6 +1393,16 @@ function init() {
     if (action) { e.preventDefault(); handleAction(action.getAttribute('data-action'), action); }
   });
 
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t || t.id !== 'px-max') return;
+    const v = Math.max(1, Math.min(50, parseInt(t.value, 10) || 5));
+    t.value = v;
+    api('/api/proxies', { method: 'POST', body: { maxPerIp: v } })
+      .then((d) => { state.proxy = d; patchProxies(); toast('ok', 'Max per IP', 'Now ' + v + ' bots per address.'); })
+      .catch((err) => toast('err', 'Failed', err.message));
+  });
+
   document.addEventListener('submit', (e) => {
     if (!e.target) return;
     if (e.target.id === 'bot-command-form') { e.preventDefault(); submitBotCommand(e.target); }
@@ -1143,7 +1411,7 @@ function init() {
 
   document.addEventListener('error', (e) => {
     const t = e.target;
-    if (t && t.tagName === 'IMG' && t.closest('.bot-avatar, .bot-hero__avatar, .board__av, .podium__av, .slot, .mini-slot')) t.classList.add('is-missing');
+    if (t && t.tagName === 'IMG' && t.closest('.bot-avatar, .pcard__skin, .board__av, .podium__av, .slot, .mini-slot, .mc-slot, .pxbot__av')) t.classList.add('is-missing');
   }, true);
 
   const releaseTabLock = () => { state._tabLock = 0; state._tabTarget = null; };

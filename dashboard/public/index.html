@@ -10,7 +10,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="preload" href="fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
-  <link rel="stylesheet" href="styles.min.css?v=20261124j" />
+  <link rel="stylesheet" href="styles.min.css?v=20261124n" />
 </head>
 <body>
   <!-- icon sprite -->
@@ -57,6 +57,7 @@
       <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></symbol>
       <symbol id="i-trend" viewBox="0 0 24 24"><path d="M3 17 9 11l4 4 8-8"/><path d="M15 7h6v6"/></symbol>
       <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></symbol>
+      <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.6 2.4 4 5.6 4 9s-1.4 6.6-4 9c-2.6-2.4-4-5.6-4-9s1.4-6.6 4-9z"/></symbol>
     </defs>
   </svg>
 
@@ -132,6 +133,7 @@
         <button class="nav__item is-active" data-view="dashboard"><svg class="ico"><use href="#i-grid"/></svg><span>Overview</span></button>
         <button class="nav__item" data-view="servers"><svg class="ico"><use href="#i-server"/></svg><span>Servers</span><em id="nav-servers-count" class="nav__count">0</em></button>
         <button class="nav__item" data-view="scores"><svg class="ico"><use href="#i-trophy"/></svg><span>Scoreboard</span></button>
+        <button class="nav__item" data-view="proxies"><svg class="ico"><use href="#i-globe"/></svg><span>Proxies</span><em id="nav-proxies-count" class="nav__count">0</em></button>
         <a class="nav__item nav__item--link" href="/site" target="_blank" rel="noopener"><svg class="ico"><use href="#i-arrow"/></svg><span>Website</span></a>
       </nav>
       <div class="sidebar__spacer"></div>
@@ -193,7 +195,7 @@
     <button class="mobilenav__item" data-view="servers"><svg class="ico"><use href="#i-server"/></svg><span>Servers</span></button>
     <button class="mobilenav__add" type="button" data-action="add" aria-label="Add bot"><svg class="ico"><use href="#i-plus"/></svg></button>
     <button class="mobilenav__item" data-view="scores"><svg class="ico"><use href="#i-trophy"/></svg><span>Scores</span></button>
-    <button class="mobilenav__item" type="button" data-action="master" aria-label="Toggle master power"><svg class="ico"><use href="#i-power"/></svg><span>Power</span></button>
+    <button class="mobilenav__item" data-view="proxies"><svg class="ico"><use href="#i-globe"/></svg><span>Proxies</span></button>
   </nav>
 
   <div id="drawer-overlay" class="drawer-overlay" hidden></div>
@@ -201,6 +203,6 @@
   <div id="item-tip" class="item-tip" hidden></div>
   <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
 
-  <script src="app.min.js?v=20261124j" defer></script>
+  <script src="app.min.js?v=20261124n" defer></script>
 </body>
 </html>
