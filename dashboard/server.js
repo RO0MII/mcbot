@@ -284,8 +284,10 @@ const OFFLINE_CODES = ['ECONNRESET', 'ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', '
 
 // /afk → GUI slot 1 → 5..4..3..2..1 → AFK arena → ONE short random walk.
 // The walk is ordinary movement (no mining / digging / placing).
-const AFK_WALK_MIN = 5;
-const AFK_WALK_MAX = 15;
+// The arena pen is tiny. One short step away is the whole walk — aiming for
+// 5–15 blocks keeps re-aiming and ends up walking the bot back to spawn.
+const AFK_WALK_MIN = 1;
+const AFK_WALK_MAX = 2;
 const AFK_TELEPORT_WATCH_MS = 60000;
 
 // ─────────────────────────────────────────────────────────────────────────────
