@@ -1426,25 +1426,34 @@ class ManagedBot {
     if (!seq || !seq.teleported || seq.walked || !this.bot || !this.bot.entity) return;
     seq.walked = true;
     this._afkWalkPaused = true;
+    const p = this.bot.entity.position;
+    // One direction for the whole walk. Never pick a fresh random angle per
+    // leg — that random-walks the bot back to spawn instead of away from it.
+    this._afkWalkOrigin = { x: p.x, y: p.y, z: p.z };
+    this._afkWalkAngle = Math.random() * Math.PI * 2;
     this._afkTarget = AFK_WALK_MIN + Math.floor(Math.random() * (AFK_WALK_MAX - AFK_WALK_MIN + 1));
     this._afkWalkMoved = 0;
     this._afkWalkLegs = 0;
     this._afkWalkDeadline = now() + 30000;
-    this.addLog('info', `AFK arena: pathfinding ${this._afkTarget} blocks in random directions (no mining).`);
+    this.addLog('info', `AFK arena: one walk of ${this._afkTarget} blocks in a single direction (no mining).`);
     this._nextAfkPath();
   }
 
-  // One short pathfinder leg to a random nearby goal. canDig is forced off so
-  // the bot only walks — it never mines, digs or places a block.
+  // Short pathfinder legs that all continue in the SAME direction, so the bot
+  // finishes away from spawn and simply stays there. canDig is forced off —
+  // it only walks, never mines, digs or places a block.
   _nextAfkPath() {
     const b = this.bot;
     if (!b || !b.entity || !b.pathfinder) { this._finishAfkWalk('pathfinder unavailable'); return; }
-    if (this._afkWalkMoved >= this._afkTarget) {
-      this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} blocks in ${this._afkWalkLegs} path${this._afkWalkLegs === 1 ? '' : 's'}`);
+    const origin = this._afkWalkOrigin || { x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z };
+    const net = Math.hypot(b.entity.position.x - origin.x, b.entity.position.z - origin.z);
+    this._afkWalkMoved = net;
+    if (net >= this._afkTarget) {
+      this._finishAfkWalk(`${net.toFixed(1)} blocks from spawn in ${this._afkWalkLegs} path${this._afkWalkLegs === 1 ? '' : 's'}`);
       return;
     }
     if (this._afkWalkLegs >= 6 || now() > this._afkWalkDeadline) {
-      this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} of ${this._afkTarget} blocks (arena limit)`);
+      this._finishAfkWalk(`${net.toFixed(1)} of ${this._afkTarget} blocks (arena limit)`);
       return;
     }
     this._afkWalkLegs++;
@@ -1456,12 +1465,13 @@ class ManagedBot {
       this._afkMovements.maxDropDown = 1;
     }
     const start = { x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z };
-    const dist = Math.min(this._afkTarget - this._afkWalkMoved, 3 + Math.floor(Math.random() * 4));
+    // A tiny jitter only skirts obstacles; it never reverses the direction.
+    const angle = this._afkWalkAngle + (Math.random() - 0.5) * 0.3;
+    const dist = Math.min(this._afkTarget - net, 3 + Math.floor(Math.random() * 4));
     this._afkLegTarget = dist;
-    const angle = Math.random() * Math.PI * 2;
     const goal = new lib.goals.GoalNear(
       Math.round(start.x + Math.sin(angle) * dist),
-      Math.round(b.entity.position.y),
+      Math.round(start.y),
       Math.round(start.z + Math.cos(angle) * dist),
       1
     );
@@ -1472,19 +1482,19 @@ class ManagedBot {
       if (this._afkWalkTimer) { clearTimeout(this._afkWalkTimer); this._afkWalkTimer = null; }
       const p = this.bot && this.bot.entity && this.bot.entity.position;
       const moved = p ? Math.hypot(p.x - start.x, p.z - start.z) : 0;
-      // The server can relocate the bot mid-leg (AFK arena, minigame lobby,
-      // etc.). That jump is not walking — never count it as movement distance.
+      // A server-side relocation mid-leg is not walking — ignore the jump.
       if (moved > (this._afkLegTarget || 6) + 3 || (p && Math.abs(p.y - start.y) > 4)) {
-        this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} blocks (server teleported mid-walk — jump ignored)`);
+        this._finishAfkWalk(`${net.toFixed(1)} blocks (server teleported mid-walk — jump ignored)`);
         return;
       }
-      this._afkWalkMoved += moved;
-      if (this._afkWalkMoved >= this._afkTarget) {
-        this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} blocks in ${this._afkWalkLegs} path${this._afkWalkLegs === 1 ? '' : 's'}`);
+      const after = p ? Math.hypot(p.x - origin.x, p.z - origin.z) : net;
+      this._afkWalkMoved = after;
+      if (after >= this._afkTarget) {
+        this._finishAfkWalk(`${after.toFixed(1)} blocks from spawn in ${this._afkWalkLegs} path${this._afkWalkLegs === 1 ? '' : 's'} — stopped.`);
         return;
       }
       if (this._afkWalkLegs >= 6 || now() > this._afkWalkDeadline) {
-        this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} of ${this._afkTarget} blocks (arena limit)`);
+        this._finishAfkWalk(`${after.toFixed(1)} of ${this._afkTarget} blocks (arena limit) — stopped.`);
         return;
       }
       this._later(() => this._nextAfkPath(), 300);
