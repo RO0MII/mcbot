@@ -1448,7 +1448,7 @@ class ManagedBot {
     this._afkTarget = AFK_WALK_MIN + Math.floor(Math.random() * (AFK_WALK_MAX - AFK_WALK_MIN + 1));
     this._afkWalkMoved = 0;
     this._afkWalkLegs = 0;
-    this._afkWalkDeadline = now() + 25000;
+    this._afkWalkDeadline = now() + 40000;
     this.addLog('info', `AFK arena: one continuous walk of ${this._afkTarget} blocks away from spawn (walking only).`);
     this._afkWalkStep();
   }
@@ -1467,7 +1467,7 @@ class ManagedBot {
       this._finishAfkWalk(`${net.toFixed(1)} blocks from spawn — stopped`);
       return;
     }
-    if (this._afkWalkLegs >= 20 || now() > this._afkWalkDeadline) {
+    if (this._afkWalkLegs >= 32 || now() > this._afkWalkDeadline) {
       this._finishAfkWalk(`${net.toFixed(1)} of ${this._afkTarget} blocks (arena limit) — stopped`);
       return;
     }
@@ -1477,7 +1477,9 @@ class ManagedBot {
     // current outward heading and only nudge slightly around obstacles.
     let yaw;
     if (!this._afkWalkEverMoved) {
-      const offsets = [0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2, Math.PI];
+      // Eight evenly spread headings before any progress: find an opening in
+      // the arena instead of repeatedly ramming the same wall.
+      const offsets = [0, Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, 3 * Math.PI / 4, -3 * Math.PI / 4, Math.PI];
       yaw = this._afkWalkYaw + offsets[this._afkWalkTry % offsets.length];
     } else {
       const outward = net > 0.3
@@ -1512,7 +1514,7 @@ class ManagedBot {
         this._finishAfkWalk(`${after.toFixed(1)} blocks from spawn — stopped`);
         return;
       }
-      if (this._afkWalkLegs >= 20 || now() > this._afkWalkDeadline) {
+      if (this._afkWalkLegs >= 32 || now() > this._afkWalkDeadline) {
         this._finishAfkWalk(`${after.toFixed(1)} of ${this._afkTarget} blocks (arena limit) — stopped`);
         return;
       }
