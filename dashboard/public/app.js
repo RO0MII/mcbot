@@ -610,8 +610,8 @@ function botCard(bot) {
     + '<button class="bot-id" type="button" data-action="bot-page" data-id="' + esc(bot.id) + '"><h3>' + esc(bot.name) + '</h3><p><i class="server-dot"></i>' + esc(serverLabel(bot)) + '</p></button>'
     + '<span class="pill ' + st.pill + '" data-f="pill"><i></i>' + st.label + '</span>'
     + '</div>'
-    + '<div class="bot-route' + (bot.proxy ? ' is-proxied' : '') + '" data-f="route" data-sig="' + esc(bot.proxy ? bot.proxy.ip + ':' + bot.proxy.port : 'direct') + '" title="Egress IP">' + icon('shield')
-    + '<span data-f="route-ip">' + esc(bot.proxy ? bot.proxy.ip + ':' + bot.proxy.port : 'Direct · no proxy') + '</span></div>'
+    + '<div class="bot-route' + (bot.proxy ? ' is-proxied' : '') + '" data-f="route" data-sig="' + esc(bot.proxy ? routeLabel(bot.proxy) : 'direct') + '" title="Egress IP">' + icon('shield')
+    + '<span data-f="route-ip">' + esc(routeLabel(bot.proxy)) + '</span></div>'
     + '<div class="bot-meta">'
     + '<div class="bot-meta__item"><span>Uptime</span><b data-uptime="' + (bot.joinedAt || '') + '">' + uptime + '</b></div>'
     + '<div class="bot-meta__item"><span>Players</span><b data-f="players">' + (bot.status === 'online' ? (bot.players || 0) : '—') + '</b></div>'
@@ -642,12 +642,12 @@ function patchBotCard(bot) {
   if (dot) { const cls = 'status-dot ' + st.dot; if (dot.className !== cls) dot.className = cls; }
   const route = card.querySelector('[data-f="route"]');
   if (route) {
-    const sig = bot.proxy ? bot.proxy.ip + ':' + bot.proxy.port : 'direct';
+    const sig = bot.proxy ? routeLabel(bot.proxy) : 'direct';
     if (route.getAttribute('data-sig') !== sig) {
       route.setAttribute('data-sig', sig);
       route.classList.toggle('is-proxied', !!bot.proxy);
       const ip = route.querySelector('[data-f="route-ip"]');
-      if (ip) ip.textContent = bot.proxy ? sig : 'Direct · no proxy';
+      if (ip) ip.textContent = sig;
     }
   }
   const sw = card.querySelector('[data-f="switch"]');
@@ -726,9 +726,13 @@ function pingBarsHtml(ping) {
   for (let i = 1; i <= 5; i++) out += '<i class="' + (i <= lvl ? 'is-on' : '') + '" style="height:' + (5 + i * 3) + 'px"></i>';
   return out + '</span>';
 }
+function routeLabel(p) {
+  if (!p) return 'Direct · no proxy';
+  return p.virtual ? 'Webshare · rotating' : p.ip + ':' + p.port;
+}
 function proxyChipHtml(bot, cls) {
   const p = bot && bot.proxy;
-  if (p) return '<span class="pxchip is-on' + (cls ? ' ' + cls : '') + '" title="Egress ' + esc(p.ip) + ':' + p.port + '">' + icon('globe') + '<b>' + esc(p.ip) + '</b><span>:' + p.port + '</span></span>';
+  if (p) return '<span class="pxchip is-on' + (cls ? ' ' + cls : '') + '" title="Egress ' + esc(routeLabel(p)) + '">' + icon('globe') + '<b>' + esc(routeLabel(p)) + '</b></span>';
   return '<span class="pxchip' + (cls ? ' ' + cls : '') + '" title="No proxy — connecting direct">' + icon('globe') + '<b>Direct</b><span>no proxy</span></span>';
 }
 function playerCardHtml(bot) {
