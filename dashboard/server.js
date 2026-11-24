@@ -35,6 +35,11 @@ function getMcProtocol() {
   if (!mcProtocol) mcProtocol = require('minecraft-protocol');
   return mcProtocol;
 }
+let pathfinderLib = null;
+function getPathfinder() {
+  if (!pathfinderLib) pathfinderLib = require('mineflayer-pathfinder');
+  return pathfinderLib;
+}
 
 // Velocity re-enters CONFIGURATION after login (backend transfer). While the
 // client is in that state, PLAY packets are a protocol violation — the server
@@ -370,6 +375,8 @@ class ManagedBot {
     this._afkTeleportTimer = null;
     this._afkWalkTimer = null;
     this._afkWalkPaused = false;
+    this._afkMovements = null;
+    this._inAfkArena = false;
 
     this.addLog('info', `Bot created for ${this.host}:${this.port}`);
   }
@@ -473,6 +480,7 @@ class ManagedBot {
       health: this.health,
       food: this.food,
       position: this.position,
+      afkArena: !!this._inAfkArena,
       ping: this.ping,
       proxy: this.proxy,
       proxySince: this.proxySince,
@@ -621,7 +629,12 @@ class ManagedBot {
     if (this._afkSequence && !this._afkSequence.walked && this.bot) {
       try { this.bot.clearControlState('forward'); } catch (_) {}
     }
+    if (this.bot && this.bot.pathfinder) {
+      try { this.bot.pathfinder.setGoal(null); } catch (_) {}
+    }
     this._afkSequence = null;
+    this._afkMovements = null;
+    this._inAfkArena = false;
   }
 
   // ── lifecycle ──
@@ -768,7 +781,8 @@ class ManagedBot {
       checkTimeoutInterval: 60000,
       // Small render distance = far fewer chunks decoded and stored per bot.
       viewDistance: LIGHT_OPTIONS.viewDistance,
-      plugins: LIGHT_OPTIONS.plugins,
+      // Pathfinder is loaded per bot (the library itself stays lazy at idle).
+      plugins: Object.assign({}, LIGHT_OPTIONS.plugins, { pathfinder: getPathfinder().pathfinder }),
     };
     if (this.version && this.version !== 'auto') opts.version = this.version;
     if (socket) {
@@ -1392,6 +1406,8 @@ class ManagedBot {
     const seq = this._afkSequence;
     if (!seq || seq.teleported || seq.walked) return;
     seq.teleported = true;
+    this._inAfkArena = true;
+    if (this.status === 'online') this.setStatus('online', 'AFK arena');
     if (this._afkTeleportTimer) { clearInterval(this._afkTeleportTimer); this._afkTeleportTimer = null; }
     this.addLog('ok', `AFK: arena reached (${reason}) — moving ${AFK_WALK_MIN}–${AFK_WALK_MAX} blocks in a random direction once.`);
     this._later(() => this._afkWalkOnce(), 1500);
@@ -1405,71 +1421,80 @@ class ManagedBot {
     this._afkTarget = AFK_WALK_MIN + Math.floor(Math.random() * (AFK_WALK_MAX - AFK_WALK_MIN + 1));
     this._afkWalkMoved = 0;
     this._afkWalkLegs = 0;
-    this._afkWalkDeadline = now() + 26000;
-    this.addLog('info', `AFK arena: one random walk of ${this._afkTarget} blocks (no mining).`);
-    this._startAfkWalkLeg();
+    this._afkWalkDeadline = now() + 30000;
+    this.addLog('info', `AFK arena: pathfinding ${this._afkTarget} blocks in random directions (no mining).`);
+    this._nextAfkPath();
   }
 
-  _startAfkWalkLeg() {
+  // One short pathfinder leg to a random nearby goal. canDig is forced off so
+  // the bot only walks — it never mines, digs or places a block.
+  _nextAfkPath() {
     const b = this.bot;
-    if (!b || !b.entity) { this._finishAfkWalk('disconnected'); return; }
-    if (this._afkWalkMoved >= this._afkTarget) { this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} blocks`); return; }
-    if (this._afkWalkLegs >= 10 || now() > this._afkWalkDeadline) {
-      // Small AFK arenas cannot always fit the full random distance. Reaching
-      // the requested minimum is still a successful one-time move.
-      const ok = this._afkWalkMoved >= AFK_WALK_MIN;
-      this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} blocks (target ${this._afkTarget}${ok ? ', arena limit' : ', arena blocked'})`);
+    if (!b || !b.entity || !b.pathfinder) { this._finishAfkWalk('pathfinder unavailable'); return; }
+    if (this._afkWalkMoved >= this._afkTarget) {
+      this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} blocks in ${this._afkWalkLegs} path${this._afkWalkLegs === 1 ? '' : 's'}`);
+      return;
+    }
+    if (this._afkWalkLegs >= 6 || now() > this._afkWalkDeadline) {
+      this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} of ${this._afkTarget} blocks (arena limit)`);
       return;
     }
     this._afkWalkLegs++;
-    const yaw = Math.random() * Math.PI * 2;
+    const lib = getPathfinder();
+    if (!this._afkMovements) {
+      this._afkMovements = new lib.Movements(b);
+      this._afkMovements.canDig = false;
+      this._afkMovements.allowSprinting = false;
+      this._afkMovements.maxDropDown = 1;
+    }
     const start = { x: b.entity.position.x, z: b.entity.position.z };
-    const fx = -Math.sin(yaw);
-    const fz = -Math.cos(yaw);
-    const legDeadline = Math.min(now() + 1800, this._afkWalkDeadline);
-    try {
-      b.look(yaw, 0, true);
-      b.setControlState('forward', true);
-    } catch (e) {
-      this._finishAfkWalk(`could not start walking: ${(e && e.message) || e}`);
-      return;
-    }
-    this._afkWalkTimer = setInterval(() => {
-      const bot = this.bot;
-      if (!bot || !bot.entity) { this._finishAfkWalk('disconnected'); return; }
-      const p = bot.entity.position;
-      const legMoved = Math.hypot(p.x - start.x, p.z - start.z);
-      // Never step into a hole / lava. Only loaded, air-like floor blocks
-      // stop us, so chunk loading cannot stall the walk.
-      try {
-        const floor = bot.blockAt(p.offset(fx * 1.4, -1, fz * 1.4));
-        if (floor && /^(air|cave_air|void_air|lava|flowing_lava|fire)$/i.test(String(floor.name || ''))) {
-          this._endAfkWalkLeg(legMoved);
-          return;
-        }
-      } catch (_) {}
-      if (legMoved >= this._afkTarget - this._afkWalkMoved || now() > legDeadline) {
-        this._endAfkWalkLeg(legMoved);
+    const dist = Math.min(this._afkTarget - this._afkWalkMoved, 3 + Math.floor(Math.random() * 4));
+    const angle = Math.random() * Math.PI * 2;
+    const goal = new lib.goals.GoalNear(
+      Math.round(start.x + Math.sin(angle) * dist),
+      Math.round(b.entity.position.y),
+      Math.round(start.z + Math.cos(angle) * dist),
+      1
+    );
+    let settled = false;
+    const legDone = () => {
+      if (settled) return;
+      settled = true;
+      if (this._afkWalkTimer) { clearTimeout(this._afkWalkTimer); this._afkWalkTimer = null; }
+      const p = this.bot && this.bot.entity && this.bot.entity.position;
+      const moved = p ? Math.hypot(p.x - start.x, p.z - start.z) : 0;
+      this._afkWalkMoved += moved;
+      if (this._afkWalkMoved >= this._afkTarget) {
+        this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} blocks in ${this._afkWalkLegs} path${this._afkWalkLegs === 1 ? '' : 's'}`);
+        return;
       }
-    }, 150);
-  }
-
-  _endAfkWalkLeg(legMoved) {
-    if (this._afkWalkTimer) { clearInterval(this._afkWalkTimer); this._afkWalkTimer = null; }
-    try { if (this.bot) this.bot.clearControlState('forward'); } catch (_) {}
-    this._afkWalkMoved += legMoved;
-    if (this._afkWalkMoved >= this._afkTarget) {
-      this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} blocks in ${this._afkWalkLegs} random direction${this._afkWalkLegs === 1 ? '' : 's'}`);
-      return;
-    }
-    this._later(() => this._startAfkWalkLeg(), 250);
+      if (this._afkWalkLegs >= 6 || now() > this._afkWalkDeadline) {
+        this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} of ${this._afkTarget} blocks (arena limit)`);
+        return;
+      }
+      this._later(() => this._nextAfkPath(), 300);
+    };
+    try {
+      b.pathfinder.setMovements(this._afkMovements);
+      Promise.resolve(b.pathfinder.goto(goal)).then(legDone, legDone);
+    } catch (_) { legDone(); return; }
+    this._afkWalkTimer = setTimeout(() => {
+      try { b.pathfinder.setGoal(null); } catch (_) {}
+      legDone();
+    }, 6000);
   }
 
   _finishAfkWalk(reason) {
-    if (this._afkWalkTimer) { clearInterval(this._afkWalkTimer); this._afkWalkTimer = null; }
+    if (this._afkWalkTimer) { clearTimeout(this._afkWalkTimer); this._afkWalkTimer = null; }
     this._afkWalkPaused = false;
-    try { if (this.bot) this.bot.clearControlState('forward'); } catch (_) {}
-    this.addLog('ok', `AFK arena: random walk finished — ${reason}.`);
+    try { if (this.bot && this.bot.pathfinder) this.bot.pathfinder.setGoal(null); } catch (_) {}
+    try {
+      if (this.bot) {
+        this.bot.clearControlState('forward');
+        this.bot.clearControlState('sprint');
+      }
+    } catch (_) {}
+    this.addLog('ok', `AFK arena: pathfind walk finished — ${reason}.`);
   }
 
   switchNow() {
@@ -1676,16 +1701,16 @@ function armorPreview(bot) {
 
 function scoreboardSnapshot(bot) {
   try {
-    const sb = bot && bot.scoreboard && bot.scoreboard.sidebar;
+    const positions = bot && bot.scoreboard;
+    if (!positions) return null;
+    // Prefer the sidebar, but some servers only publish to list/belowName.
+    const sb = positions.sidebar || positions.list || positions.belowName;
     if (!sb) return null;
-    let title = sb.title == null ? 'Scoreboard' : sb.title;
-    if (typeof title !== 'string') {
-      try { title = title.toString(); } catch (_) { title = 'Scoreboard'; }
-    }
+    const title = chatText(sb.title) || 'Scoreboard';
     const items = (sb.items || []).slice(0, 24).map((it) => {
       let label = it.name;
       try { if (it.displayName && typeof it.displayName.toString === 'function') label = it.displayName.toString(); } catch (_) {}
-      const clean = String(label).replace(/§./g, '').trim();
+      const clean = chatText(label);
       if (!clean) return null;
       // Sidebar labels usually carry the real value (Money 1K, Shards 537).
       const m = clean.match(/^(.*?)([\d,.]+)\s*([KMB])?\s*$/i);
@@ -1706,12 +1731,18 @@ function scoreboardSnapshot(bot) {
         value: Number(it.value) || 0,
         label: clean,
         nameLabel,
-        player: (() => { try { if (it.displayName && typeof it.displayName.toString === 'function') { const pn = String(it.displayName.toString()); if (pn) return pn.replace(/§./g, '').trim(); } } catch (_) {} return String(it.name || '').replace(/§./g, '').trim(); })(),
+        player: (() => {
+          try { if (it.displayName && typeof it.displayName.toString === 'function') {
+            const pn = chatText(it.displayName.toString());
+            if (pn) return pn;
+          } } catch (_) {}
+          return chatText(it.name);
+        })(),
         amount,
         amountText,
       };
     }).filter(Boolean);
-    return { title: String(title).replace(/§./g, '').trim() || 'Scoreboard', items };
+    return { title, items };
   } catch (_) { return null; }
 }
 

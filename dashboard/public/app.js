@@ -24,7 +24,9 @@ const fmtCompact = (n) => {
   if (n >= 1e3) return (n / 1e3).toFixed(n % 1e3 ? 1 : 0) + 'K';
   return String(Math.round(n));
 };
-const statusMeta = (bot) => ({
+const statusMeta = (bot) => (bot && bot.afkArena && bot.status === 'online'
+  ? { label: 'AFK arena', pill: 'pill--afk', dot: 'online' }
+  : {
   online: { label: 'Online', pill: 'pill--online', dot: 'online' },
   connecting: { label: 'Connecting', pill: 'pill--connecting', dot: 'connecting' },
   reconnecting: { label: 'Retrying', pill: 'pill--connecting', dot: 'connecting' },
@@ -120,7 +122,7 @@ function invStripSig(bot) {
 }
 function vitalsSig(bot) {
   const p = bot.position;
-  return [bot.status, bot.health, bot.food, bot.autoEat, p ? p.x + ',' + p.y + ',' + p.z : ''].join('|');
+  return [bot.status, bot.health, bot.food, bot.autoEat, bot.afkArena ? 'arena' : '', p ? p.x + ',' + p.y + ',' + p.z : ''].join('|');
 }
 function boardSig() {
   return (state.bots || []).map((b) => {
@@ -580,6 +582,7 @@ function botVitals(bot) {
   if (hp !== null) out += '<span class="vital vital--hp" title="Health">' + icon('heart') + '<b>' + hp + '</b></span>';
   if (food !== null) out += '<span class="vital vital--food" title="Food">' + icon('food') + '<b>' + food + '</b></span>';
   if (bot.autoEat) out += '<span class="bot-flag" title="Auto-eat">' + icon('zap') + 'AE</span>';
+  if (bot.afkArena) out += '<span class="bot-afk" title="Bot is in the AFK arena">' + icon('clock') + 'AFK arena</span>';
   if (pos) out += '<span class="bot-coords" title="Position">' + icon('pin') + esc(pos) + '</span>';
   out += '</div>';
   return out;
@@ -744,7 +747,8 @@ function playerCardHtml(bot) {
   const routeSig = bot.proxy ? bot.proxy.ip + ':' + bot.proxy.port : 'direct';
   const tags = '<span class="ptag">' + icon('user') + ' ' + esc(d.gamemode || 'Survival') + '</span>'
     + '<span class="ptag">' + icon('pin') + ' ' + esc(d.dimension || 'Overworld') + '</span>'
-    + (pos ? '<span class="ptag ptag--mono">' + icon('cube') + ' ' + esc(pos) + '</span>' : '')
+    + '<span class="ptag ptag--mono' + (pos ? '' : ' hidden') + '" data-f="hero-pos">' + icon('cube') + ' <span data-f="hero-pos-text">' + esc(pos) + '</span></span>'
+    + '<span class="ptag ptag--afk' + (bot.afkArena ? '' : ' hidden') + '" data-f="hero-arena">' + icon('clock') + ' AFK arena</span>'
     + '<span class="ptag ' + (bot.loggedIn ? 'is-good' : '') + '" data-f="hero-tag">' + icon('shield') + ' ' + (bot.loggedIn ? 'Logged in' : 'Auto login') + '</span>';
   return '<section class="pcard' + (bot.status === 'online' ? ' is-online' : '') + '">'
     + '<div class="pcard__skin">'
@@ -802,6 +806,7 @@ function botPageHtml() {
     { key: 'players', icon: 'users', label: 'Players', value: bot.players == null ? '—' : String(bot.players) },
     { key: 'uptime', icon: 'clock', label: 'Uptime', value: bot.joinedAt ? fmtDuration(Date.now() - bot.joinedAt) : '—', uptime: bot.joinedAt || '' },
     { key: 'xp', icon: 'zap', label: 'XP', value: String(xp.level || 0) },
+    { key: 'position', icon: 'pin', label: 'XYZ', value: bot.position ? Math.round(bot.position.x) + ' ' + Math.round(bot.position.y) + ' ' + Math.round(bot.position.z) : '—' },
   ];
   const metricsHtml = metrics.map((m) =>
     '<div class="bp-metric' + (m.bad ? ' is-bad' : (m.warn ? ' is-warn' : '')) + '" data-f="metric-' + m.key + '"><span>' + icon(m.icon) + ' ' + m.label + '</span><b data-f="m-' + m.key + '"' + (m.key === 'uptime' ? ' data-uptime="' + m.uptime + '"' : '') + '>' + m.value + '</b><em>' + m.label + '</em></div>'
@@ -847,6 +852,17 @@ function patchBotPage(bot) {
   if (login) { const html = esc(bot.host) + ':' + bot.port + ' · v' + esc(bot.version) + ' · ' + (bot.loggedIn ? 'Logged in' : 'Auto login pending'); if (login.innerHTML !== html) login.innerHTML = html; }
   const tag = root.querySelector('[data-f="hero-tag"]');
   if (tag) { tag.className = 'ptag' + (bot.loggedIn ? ' is-good' : ''); const html = icon('shield') + ' ' + (bot.loggedIn ? 'Logged in' : 'Auto login'); if (tag.innerHTML !== html) tag.innerHTML = html; }
+  const posText = bot.position && Number.isFinite(bot.position.x)
+    ? Math.round(bot.position.x) + ' ' + Math.round(bot.position.y) + ' ' + Math.round(bot.position.z) : '—';
+  const posTag = root.querySelector('[data-f="hero-pos"]');
+  if (posTag) {
+    posTag.classList.toggle('hidden', !bot.position || !Number.isFinite(bot.position.x));
+    const txt = posTag.querySelector('[data-f="hero-pos-text"]');
+    if (txt && txt.textContent !== posText) txt.textContent = posText;
+  }
+  const arenaTag = root.querySelector('[data-f="hero-arena"]');
+  if (arenaTag) arenaTag.classList.toggle('hidden', !bot.afkArena);
+  setText('[data-f="m-position"]', posText);
   setText('[data-f="m-health"]', hp + '/20');
   setText('[data-f="m-food"]', food + '/20');
   setText('[data-f="m-ping"]', bot.ping == null ? '—' : bot.ping + ' ms');
