@@ -1439,6 +1439,8 @@ class ManagedBot {
     // in the tiny arena where pathfinder goals get stuck against the walls.
     this._afkWalkOrigin = { x: p.x, y: p.y, z: p.z };
     this._afkWalkYaw = Math.random() * Math.PI * 2;
+    this._afkWalkCurrentYaw = this._afkWalkYaw;
+    this._afkWalkEverMoved = false;
     this._afkWalkTry = 0;
     this._afkTarget = AFK_WALK_MIN + Math.floor(Math.random() * (AFK_WALK_MAX - AFK_WALK_MIN + 1));
     this._afkWalkMoved = 0;
@@ -1466,15 +1468,22 @@ class ManagedBot {
       this._finishAfkWalk(`${net.toFixed(1)} of ${this._afkTarget} blocks (arena limit) — stopped`);
       return;
     }
-    // Mineflayer's forward vector is (-sin(yaw), -cos(yaw)); match lookAt's
-    // convention so we keep walking along the outward vector from spawn.
-    const outward = net > 0.5
-      ? Math.atan2(-(cur.x - origin.x), -(cur.z - origin.z))
-      : this._afkWalkYaw;
-    const offsets = net > 0.5
-      ? [0, 0.35, -0.35, 0.7, -0.7, 1.1, -1.1]
-      : [0, 0.35, -0.35, 0.7, -0.7, 1.1, -1.1, Math.PI];
-    const yaw = outward + offsets[this._afkWalkTry % offsets.length];
+    // Mineflayer's forward vector is (-sin(yaw), -cos(yaw)). Before the first
+    // step any direction is outward, so a blocked side may be swapped for its
+    // opposite. After the bot has actually moved, NEVER flip 180° — keep the
+    // current outward heading and only nudge slightly around obstacles.
+    let yaw;
+    if (!this._afkWalkEverMoved) {
+      const offsets = [0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2, Math.PI];
+      yaw = this._afkWalkYaw + offsets[this._afkWalkTry % offsets.length];
+    } else {
+      const outward = net > 0.3
+        ? Math.atan2(-(cur.x - origin.x), -(cur.z - origin.z))
+        : this._afkWalkCurrentYaw;
+      const offsets = [0, 0.35, -0.35, 0.7, -0.7];
+      yaw = outward + offsets[this._afkWalkTry % offsets.length];
+    }
+    this._afkWalkCurrentYaw = yaw;
     const stepStart = { x: cur.x, y: cur.y, z: cur.z };
     this._afkWalkLegs++;
     try {
@@ -1504,9 +1513,10 @@ class ManagedBot {
         return;
       }
       // Keep the yaw when progress was made; only turn slightly when stuck.
+      if (after > net + 0.25) this._afkWalkEverMoved = true;
       this._afkWalkTry = after > net + 0.25 ? 0 : this._afkWalkTry + 1;
       this._later(() => this._afkWalkStep(), 120);
-    }, 900);
+    }, 1200);
   }
 
   _finishAfkWalk(reason) {
