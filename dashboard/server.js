@@ -31,7 +31,6 @@ function getMineflayer() {
   return mineflayer;
 }
 const proxyPool = require('./proxy-pool');
-const { isLocalTarget } = proxyPool;
 
 // Light bot profile: fewer plugins, fewer chunks, lower RAM/CPU per bot.
 const LIGHT_OPTIONS = require('./bot-options');
@@ -307,7 +306,6 @@ class ManagedBot {
     this._permanentBan = false;
     this._pauseLogged = false;
     this._proxyTries = 0;
-    this._diagDone = false;
     this._gateTimer = null;
     this.loggedIn = false;
     this.loginAttempts = 0;
@@ -625,9 +623,9 @@ class ManagedBot {
   }
 
   /**
-   * Choose an egress route, then dial. A proxy is opened *before* the client is
-   * created, so a dead proxy can never leave a bot hanging in "connecting" —
-   * we simply retry direct. Bots always come back.
+   * Choose an egress route, then dial. Every bot is routed through a proxy —
+   * there is no direct fallback, so the host's real IP is never exposed. A
+   * dead route is retried with a fresh proxy instead.
    */
   _connect(slotTaken) {
     if (!this.wanted) return;
@@ -651,17 +649,15 @@ class ManagedBot {
       this.addLog('info', `Verifying proxy routes against ${this.host}…`);
       proxyPool.setTarget(this.host, this.port);
     }
-    // Local/private servers (LAN test boxes, localhost) go straight out —
-    // a public proxy cannot reach them and there is no reason to try.
-    const localTarget = isLocalTarget(this.host);
-    if (localTarget && !this._localNoted) {
-      proxyPool.release(this.id); // do not keep a stale tunnel/route pin
-      this.addLog('info', `Local/private target ${this.host} — connecting direct without a proxy.`);
-      this._localNoted = true;
+    // No direct path: local/private targets are no longer an exception, so a
+    // bot can never dial out with the host's real IP.
+    const px = proxyPool.pick(this.id, this.name);
+    if (!px) {
+      this.addLog('warn', 'No proxy route available — waiting for a route instead of connecting direct.');
+      this.setStatus('reconnecting', 'Waiting for a proxy route…');
+      this._scheduleReconnect(5000);
+      return;
     }
-    const px = (this._directNext || localTarget) ? null : proxyPool.pick(this.id, this.name);
-    this._directNext = false;
-    if (!px) return this._connectNow(null);
 
     const routeLabel = px.virtual ? 'Webshare tunnel' : `${px.ip}:${px.port}`;
     this.setStatus('connecting', px.virtual ? 'Opening Webshare tunnel…' : `Opening proxy ${px.ip}…`);
@@ -687,9 +683,8 @@ class ManagedBot {
         return;
       }
       this._proxyTries = 0;
-      this.addLog('warn', `${routeLabel} unreachable (${why}) — connecting direct as a last resort.`);
-      this._directNext = true;
-      this._connectNow(null);
+      this.addLog('warn', `${routeLabel} unreachable (${why}) — no direct fallback; retrying with a fresh proxy.`);
+      this._scheduleReconnect(4000 + Math.floor(Math.random() * 3000));
     });
   }
 
@@ -728,12 +723,18 @@ class ManagedBot {
     };
     if (this.version && this.version !== 'auto') opts.version = this.version;
     if (socket) {
-      // minecraft-protocol calls options.connect(client) for offline auth.
-      // Handing it a socket that already reached the server through SOCKS5
-      // skips DNS + TCP entirely on our side.
+      // minecraft-protocol calls options.connect(client) *before* it registers
+      // the handshake plugin. The proxy socket is already connected, so its
+      // own 'connect' event never fires again — emit on the next tick, after
+      // setProtocol is installed. Emitting synchronously sends no handshake
+      // and the server closes the idle tunnel ("socketClosed").
       opts.connect = (client) => {
-        try { client.setSocket(socket); client.emit('connect'); }
-        catch (e) { try { client.emit('error', e); } catch (_) {} }
+        try {
+          client.setSocket(socket);
+          setImmediate(() => {
+            try { if (!client.ended) client.emit('connect'); } catch (_) {}
+          });
+        } catch (e) { try { client.emit('error', e); } catch (_) {} }
       };
     }
     this.proxy = proxy ? {
@@ -789,7 +790,6 @@ class ManagedBot {
       this._banText = '';
       this._permanentBan = false;
       this._pauseLogged = false;
-      this._diagDone = false;
       this._lastKick = '';
       this.setStatus('online', 'Online');
       this.addLog('ok', `Joined ${this.host}:${this.port} as ${this.name}`);
@@ -926,13 +926,8 @@ class ManagedBot {
       this.addLog('warn', 'Disconnected.');
       this.setStatus('reconnecting', 'Disconnected');
       this._retries = (this._retries || 0) + 1;
-      // A SOCKS route can close before the kick packet arrives, hiding the
-      // real reason. Retry once direct so the panel shows what the server said.
-      if (!this._diagDone && this.proxy && !this._sawKick) {
-        this._diagDone = true;
-        this._directNext = true;
-        this.addLog('info', 'Proxy closed before the server replied — retrying once direct to read the reason…');
-      }
+      // Kick reasons are read from the tunnel itself — never retry direct,
+      // even when a proxy closes before the server's reason packet arrives.
       this._sawKick = false;
       let delay;
       if (this._bannedUntil && now() < this._bannedUntil) {
