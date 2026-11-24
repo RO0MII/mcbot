@@ -1427,100 +1427,78 @@ class ManagedBot {
     seq.walked = true;
     this._afkWalkPaused = true;
     const p = this.bot.entity.position;
-    // Pick one outward direction from the arena entry point. Legs may fan out
-    // slightly to get around walls, but always continue AWAY from that point —
-    // never re-roll a fresh random angle that walks the bot back to spawn.
+    // One walk, one general direction, then stop. Plain forward control works
+    // in the tiny arena where pathfinder goals get stuck against the walls.
     this._afkWalkOrigin = { x: p.x, y: p.y, z: p.z };
-    this._afkWalkAngle = Math.random() * Math.PI * 2;
+    this._afkWalkYaw = Math.random() * Math.PI * 2;
     this._afkWalkTry = 0;
     this._afkTarget = AFK_WALK_MIN + Math.floor(Math.random() * (AFK_WALK_MAX - AFK_WALK_MIN + 1));
     this._afkWalkMoved = 0;
     this._afkWalkLegs = 0;
-    this._afkWalkDeadline = now() + 45000;
-    this.addLog('info', `AFK arena: one continuous walk of ${this._afkTarget} blocks away from spawn (no mining).`);
-    this._nextAfkPath();
+    this._afkWalkDeadline = now() + 14000;
+    this.addLog('info', `AFK arena: one continuous walk of ${this._afkTarget} blocks away from spawn (walking only).`);
+    this._afkWalkStep();
   }
 
-  // Short pathfinder legs that keep moving away from the arena entry point,
-  // then stop. If one direction is blocked, try a nearby outward angle — never
-  // a reverse angle. canDig is forced off: only walking, no mining/placing.
-  _nextAfkPath() {
+  // Hold "forward" briefly, measure net movement from the arena entry point,
+  // then either continue outward or try a nearby outward yaw if blocked.
+  // Only control states are used — never dig, place, or pathfinder.
+  _afkWalkStep() {
     const b = this.bot;
-    if (!b || !b.entity || !b.pathfinder) { this._finishAfkWalk('pathfinder unavailable'); return; }
+    if (!b || !b.entity) { this._finishAfkWalk('bot unavailable'); return; }
     const origin = this._afkWalkOrigin || { x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z };
     const cur = b.entity.position;
     const net = Math.hypot(cur.x - origin.x, cur.z - origin.z);
     this._afkWalkMoved = net;
     if (net >= this._afkTarget) {
-      this._finishAfkWalk(`${net.toFixed(1)} blocks from spawn in ${this._afkWalkLegs} path${this._afkWalkLegs === 1 ? '' : 's'} — stopped`);
+      this._finishAfkWalk(`${net.toFixed(1)} blocks from spawn — stopped`);
       return;
     }
-    if (this._afkWalkLegs >= 8 || now() > this._afkWalkDeadline) {
+    if (this._afkWalkLegs >= 12 || now() > this._afkWalkDeadline) {
       this._finishAfkWalk(`${net.toFixed(1)} of ${this._afkTarget} blocks (arena limit) — stopped`);
       return;
     }
-    this._afkWalkLegs++;
-    const lib = getPathfinder();
-    if (!this._afkMovements) {
-      this._afkMovements = new lib.Movements(b);
-      this._afkMovements.canDig = false;
-      this._afkMovements.allowSprinting = false;
-      this._afkMovements.maxDropDown = 1;
-    }
-    // Once away from spawn, aim further along the current outward vector.
-    // At spawn any direction is outward, so use the chosen base angle and let
-    // the fallback list try the opposite side if the first one is walled off.
+    // Mineflayer's forward vector is (-sin(yaw), 0, cos(yaw)). Reverse that to
+    // point along the current outward vector from spawn.
     const outward = net > 0.5
-      ? Math.atan2(cur.x - origin.x, cur.z - origin.z)
-      : this._afkWalkAngle;
+      ? Math.atan2(-(cur.x - origin.x), cur.z - origin.z)
+      : this._afkWalkYaw;
     const offsets = net > 0.5
-      ? [0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2]
-      : [0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2, Math.PI];
-    const angle = outward + offsets[this._afkWalkTry % offsets.length];
-    const start = { x: cur.x, y: cur.y, z: cur.z };
-    const dist = Math.min(this._afkTarget - net, 2 + Math.floor(Math.random() * 3));
-    this._afkLegTarget = dist;
-    const goal = new lib.goals.GoalNear(
-      Math.round(start.x + Math.sin(angle) * dist),
-      Math.round(start.y),
-      Math.round(start.z + Math.cos(angle) * dist),
-      1
-    );
-    let settled = false;
-    const legDone = () => {
-      if (settled) return;
-      settled = true;
-      if (this._afkWalkTimer) { clearTimeout(this._afkWalkTimer); this._afkWalkTimer = null; }
+      ? [0, 0.35, -0.35, 0.7, -0.7, 1.1, -1.1]
+      : [0, 0.35, -0.35, 0.7, -0.7, 1.1, -1.1, Math.PI];
+    const yaw = outward + offsets[this._afkWalkTry % offsets.length];
+    const stepStart = { x: cur.x, y: cur.y, z: cur.z };
+    this._afkWalkLegs++;
+    try {
+      b.look(yaw, 0, true);
+      b.setControlState('forward', true);
+      b.clearControlState('sprint');
+    } catch (_) {
+      this._finishAfkWalk('walking controls unavailable');
+      return;
+    }
+    this._afkWalkTimer = setTimeout(() => {
+      try { b.setControlState('forward', false); } catch (_) {}
       const p = this.bot && this.bot.entity && this.bot.entity.position;
-      const moved = p ? Math.hypot(p.x - start.x, p.z - start.z) : 0;
-      // A server-side relocation mid-leg is not walking — ignore the jump.
-      if (moved > (this._afkLegTarget || 6) + 3 || (p && Math.abs(p.y - start.y) > 4)) {
+      const jumped = p && (Math.hypot(p.x - stepStart.x, p.z - stepStart.z) > 7 || Math.abs(p.y - stepStart.y) > 4);
+      if (jumped) {
         this._finishAfkWalk(`${net.toFixed(1)} blocks (server teleported mid-walk — jump ignored)`);
         return;
       }
       const after = p ? Math.hypot(p.x - origin.x, p.z - origin.z) : net;
       this._afkWalkMoved = after;
       if (after >= this._afkTarget) {
-        this._finishAfkWalk(`${after.toFixed(1)} blocks from spawn in ${this._afkWalkLegs} path${this._afkWalkLegs === 1 ? '' : 's'} — stopped`);
+        this._finishAfkWalk(`${after.toFixed(1)} blocks from spawn — stopped`);
         return;
       }
-      // Only rotate the outward angle when this leg made no real progress.
-      // A successful leg keeps its direction so the bot does not wander back.
-      this._afkWalkTry = after > net + 0.35 ? 0 : this._afkWalkTry + 1;
-      if (this._afkWalkLegs >= 8 || now() > this._afkWalkDeadline) {
+      if (this._afkWalkLegs >= 12 || now() > this._afkWalkDeadline) {
         this._finishAfkWalk(`${after.toFixed(1)} of ${this._afkTarget} blocks (arena limit) — stopped`);
         return;
       }
-      this._later(() => this._nextAfkPath(), 250);
-    };
-    try {
-      b.pathfinder.setMovements(this._afkMovements);
-      Promise.resolve(b.pathfinder.goto(goal)).then(legDone, legDone);
-    } catch (_) { legDone(); return; }
-    this._afkWalkTimer = setTimeout(() => {
-      try { b.pathfinder.setGoal(null); } catch (_) {}
-      legDone();
-    }, 5000);
+      // Keep the yaw when progress was made; only turn slightly when stuck.
+      this._afkWalkTry = after > net + 0.25 ? 0 : this._afkWalkTry + 1;
+      this._later(() => this._afkWalkStep(), 120);
+    }, 900);
   }
 
   _finishAfkWalk(reason) {
@@ -1533,7 +1511,7 @@ class ManagedBot {
         this.bot.clearControlState('sprint');
       }
     } catch (_) {}
-    this.addLog('ok', `AFK arena: pathfind walk finished — ${reason}.`);
+    this.addLog('ok', `AFK arena: one-time walk finished — ${reason}.`);
   }
 
   switchNow() {
