@@ -670,6 +670,7 @@ class ManagedBot {
     this.health = null;
     this.food = null;
     this.position = null;
+    this.ping = null;
     this.setStatus('stopped', 'Stopped');
     this.addLog('warn', reason);
   }
@@ -982,6 +983,7 @@ class ManagedBot {
       this.health = null;
       this.food = null;
       this.position = null;
+      this.ping = null;
       this.loggedIn = false;
       this.switched = false;
       this.bot = null;
@@ -1311,7 +1313,11 @@ class ManagedBot {
         const p = this.bot.entity.position;
         this.position = { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) };
       }
-      if (this.bot.player && typeof this.bot.player.ping === 'number') this.ping = this.bot.player.ping;
+      // Velocity/HungryBirds reports 0 for tab-list latency. Zero is not a
+      // measured round trip, so keep it as "no data" instead of showing a
+      // fake 0 ms / excellent connection in the panel.
+      const tabPing = this.bot.player && this.bot.player.ping;
+      this.ping = typeof tabPing === 'number' && Number.isFinite(tabPing) && tabPing > 0 ? Math.round(tabPing) : null;
     } catch (_) {}
     this.emit();
   }

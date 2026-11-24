@@ -325,7 +325,7 @@ function renderPlayer(bot) {
         ${playerStat('pin', 'Dimension', prettyGameId(d.dimension))}
         ${playerStat('sliders', 'Difficulty', d.difficulty ? String(d.difficulty).charAt(0).toUpperCase() + String(d.difficulty).slice(1) : '—')}
         ${playerStat('users', 'Players', bot.players == null ? '—' : bot.players)}
-        ${playerStat('activity', 'Ping', bot.ping == null ? '—' : `${bot.ping} ms`)}
+        ${playerStat('activity', 'Ping', bot.ping > 0 ? `${bot.ping} ms` : '—')}
         ${playerStat('server', 'Server', serverLabel(bot))}
         ${playerStat('clock', 'In-game time', gameTime, d.time ? (d.time.isDay ? 'Daytime' : 'Night') : '')}
         ${playerStat('arrow', 'Position', pos)}

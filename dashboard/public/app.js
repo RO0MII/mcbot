@@ -708,8 +708,12 @@ function scoreboardHtml(bot) {
     + '<div class="sb__foot"><span>' + rows.length + ' lines · sidebar</span><b>' + esc(title) + '</b></div></div>';
 }
 /* ── player card ── */
+// A ping of 0 (or anything non-positive) is "unknown", not a perfect
+// connection. Servers behind Velocity commonly report 0 in the tab list.
+function hasPing(ping) { return ping != null && Number.isFinite(ping) && ping > 0; }
+function pingText(ping) { return hasPing(ping) ? Math.round(ping) + ' ms' : '—'; }
 function pingLevel(ping) {
-  if (ping == null || !Number.isFinite(ping)) return 0;
+  if (!hasPing(ping)) return 0;
   if (ping <= 80) return 5;
   if (ping <= 150) return 4;
   if (ping <= 300) return 3;
@@ -717,7 +721,7 @@ function pingLevel(ping) {
   return 1;
 }
 function pingQuality(ping) {
-  if (ping == null || !Number.isFinite(ping)) return 'no signal';
+  if (!hasPing(ping)) return 'no signal';
   if (ping <= 80) return 'excellent';
   if (ping <= 150) return 'good';
   if (ping <= 300) return 'fair';
@@ -725,7 +729,7 @@ function pingQuality(ping) {
 }
 function pingBarsHtml(ping) {
   const lvl = pingLevel(ping);
-  let out = '<span class="pingbars" data-lvl="' + lvl + '" data-q="' + pingQuality(ping).replace(/\s+/g, '-') + '" title="' + (ping == null ? 'No ping data yet' : ping + ' ms') + '">';
+  let out = '<span class="pingbars" data-lvl="' + lvl + '" data-q="' + pingQuality(ping).replace(/\s+/g, '-') + '" title="' + (hasPing(ping) ? Math.round(ping) + ' ms' : 'Server does not report latency') + '">';
   for (let i = 1; i <= 5; i++) out += '<i class="' + (i <= lvl ? 'is-on' : '') + '" style="height:' + (5 + i * 3) + 'px"></i>';
   return out + '</span>';
 }
@@ -765,7 +769,7 @@ function playerCardHtml(bot) {
     + '<div class="pcard__side">'
     + '<div class="pcard__stat">'
     + '<span class="pcard__label">Ping</span>'
-    + '<div class="pcard__pingrow">' + pingBarsHtml(ping) + '<b data-f="pc-ping">' + (ping == null ? '—' : ping + '<small>ms</small>') + '</b></div>'
+    + '<div class="pcard__pingrow">' + pingBarsHtml(ping) + '<b data-f="pc-ping">' + (hasPing(ping) ? Math.round(ping) + '<small>ms</small>' : '—') + '</b></div>'
     + '<span class="pcard__hint" data-f="pc-quality">' + pingQuality(ping) + '</span>'
     + '</div>'
     + '<div class="pcard__stat">'
@@ -800,16 +804,23 @@ function botPageHtml() {
   const hp = Number.isFinite(bot.health) ? Math.max(0, Math.min(20, bot.health)) : 0;
   const food = Number.isFinite(bot.food) ? Math.max(0, Math.min(20, bot.food)) : 0;
   const metrics = [
-    { key: 'health', icon: 'heart', label: 'Health', value: hp + '/20', bad: hp <= 6 },
-    { key: 'food', icon: 'food', label: 'Food', value: food + '/20', warn: food <= 6 },
-    { key: 'ping', icon: 'wifi', label: 'Ping', value: bot.ping == null ? '—' : bot.ping + ' ms' },
-    { key: 'players', icon: 'users', label: 'Players', value: bot.players == null ? '—' : String(bot.players) },
-    { key: 'uptime', icon: 'clock', label: 'Uptime', value: bot.joinedAt ? fmtDuration(Date.now() - bot.joinedAt) : '—', uptime: bot.joinedAt || '' },
-    { key: 'xp', icon: 'zap', label: 'XP', value: String(xp.level || 0) },
-    { key: 'position', icon: 'pin', label: 'XYZ', value: bot.position ? Math.round(bot.position.x) + ' ' + Math.round(bot.position.y) + ' ' + Math.round(bot.position.z) : '—' },
+    { key: 'health', icon: 'heart', label: 'Health', value: hp + '/20', sub: 'vitality', fill: (hp / 20) * 100, bad: hp <= 6 },
+    { key: 'food', icon: 'food', label: 'Food', value: food + '/20', sub: 'saturation', fill: (food / 20) * 100, warn: food <= 6 },
+    { key: 'ping', icon: 'wifi', label: 'Ping', value: pingText(bot.ping), sub: hasPing(bot.ping) ? 'latency · ms' : 'not reported' },
+    { key: 'players', icon: 'users', label: 'Players', value: bot.players == null ? '—' : String(bot.players), sub: 'online' },
+    { key: 'uptime', icon: 'clock', label: 'Uptime', value: bot.joinedAt ? fmtDuration(Date.now() - bot.joinedAt) : '—', uptime: bot.joinedAt || '', sub: 'this session' },
+    { key: 'xp', icon: 'zap', label: 'XP', value: String(xp.level || 0), sub: 'level' },
+    { key: 'position', icon: 'pin', label: 'XYZ', value: bot.position ? Math.round(bot.position.x) + ' ' + Math.round(bot.position.y) + ' ' + Math.round(bot.position.z) : '—', sub: 'coordinates' },
   ];
   const metricsHtml = metrics.map((m) =>
-    '<div class="bp-metric' + (m.bad ? ' is-bad' : (m.warn ? ' is-warn' : '')) + '" data-f="metric-' + m.key + '"><span>' + icon(m.icon) + ' ' + m.label + '</span><b data-f="m-' + m.key + '"' + (m.key === 'uptime' ? ' data-uptime="' + m.uptime + '"' : '') + '>' + m.value + '</b><em>' + m.label + '</em></div>'
+    '<div class="bp-metric' + (m.bad ? ' is-bad' : (m.warn ? ' is-warn' : '')) + (m.fill == null ? '' : ' has-meter') + '"'
+      + ' data-f="metric-' + m.key + '"'
+      + (m.fill == null ? '' : ' style="--fill:' + Math.max(0, Math.min(100, m.fill)).toFixed(0) + '%"')
+      + '><span class="bp-metric__label">' + icon(m.icon) + '<i>' + m.label + '</i></span>'
+      + '<b data-f="m-' + m.key + '"' + (m.key === 'uptime' ? ' data-uptime="' + m.uptime + '"' : '') + '>' + m.value + '</b>'
+      + '<em>' + esc(m.sub || '') + '</em>'
+      + (m.fill == null ? '' : '<span class="bp-metric__meter"><i></i></span>')
+      + '</div>'
   ).join('');
   return '<div class="bp-progress" aria-hidden="true"><i></i></div>'
     + playerCardHtml(bot)
@@ -865,17 +876,32 @@ function patchBotPage(bot) {
   setText('[data-f="m-position"]', posText);
   setText('[data-f="m-health"]', hp + '/20');
   setText('[data-f="m-food"]', food + '/20');
-  setText('[data-f="m-ping"]', bot.ping == null ? '—' : bot.ping + ' ms');
+  const setMeter = (key, value) => {
+    const el = root.querySelector('[data-f="metric-' + key + '"]');
+    if (!el) return;
+    const pct = Math.max(0, Math.min(100, (Number(value) || 0) * 5)).toFixed(0) + '%';
+    if (el.style.getPropertyValue('--fill') !== pct) el.style.setProperty('--fill', pct);
+    el.classList.toggle('is-bad', key === 'health' && hp <= 6);
+    el.classList.toggle('is-warn', key === 'food' && food <= 6);
+  };
+  setMeter('health', hp);
+  setMeter('food', food);
+  setText('[data-f="m-ping"]', pingText(bot.ping));
+  const pingSub = root.querySelector('[data-f="metric-ping"] em');
+  if (pingSub) pingSub.textContent = hasPing(bot.ping) ? 'latency · ms' : 'not reported';
   const pcPing = root.querySelector('[data-f="pc-ping"]');
-  if (pcPing) { const html = bot.ping == null ? '—' : bot.ping + '<small>ms</small>'; if (pcPing.innerHTML !== html) pcPing.innerHTML = html; }
+  if (pcPing) { const html = hasPing(bot.ping) ? Math.round(bot.ping) + '<small>ms</small>' : '—'; if (pcPing.innerHTML !== html) pcPing.innerHTML = html; }
   const bars = root.querySelector('.pcard .pingbars');
   if (bars) {
     const lvl = pingLevel(bot.ping);
+    const q = pingQuality(bot.ping).replace(/\s+/g, '-');
     if (bars.getAttribute('data-lvl') !== String(lvl)) {
       bars.setAttribute('data-lvl', String(lvl));
-      bars.setAttribute('data-q', pingQuality(bot.ping).replace(/\s+/g, '-'));
       Array.prototype.forEach.call(bars.children, (el, i) => el.classList.toggle('is-on', i < lvl));
     }
+    if (bars.getAttribute('data-q') !== q) bars.setAttribute('data-q', q);
+    const title = hasPing(bot.ping) ? Math.round(bot.ping) + ' ms' : 'Server does not report latency';
+    if (bars.getAttribute('title') !== title) bars.setAttribute('title', title);
   }
   const pq = root.querySelector('[data-f="pc-quality"]'); if (pq) pq.textContent = pingQuality(bot.ping);
   const alertEl = root.querySelector('[data-f="pc-alert"]');
