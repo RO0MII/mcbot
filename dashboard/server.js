@@ -277,6 +277,12 @@ const RESTART_COUNTDOWN = /\brestart(?:ing)?\b.*\b[123]\b|\b3\b[\s.]+\b2\b[\s.]+
 const VERIFY_PROMPT = /you are being verified|please do not move.*automatic|verification.*(?:complete|passed|success)|you(?:'ve| have) passed/i;
 const OFFLINE_CODES = ['ECONNRESET', 'ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'EAI_AGAIN', 'EPIPE', 'ENETUNREACH'];
 
+// /afk → GUI slot 1 → 5..4..3..2..1 → AFK arena → ONE short random walk.
+// The walk is ordinary movement (no mining / digging / placing).
+const AFK_WALK_MIN = 5;
+const AFK_WALK_MAX = 15;
+const AFK_TELEPORT_WATCH_MS = 60000;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bot manager
 // ─────────────────────────────────────────────────────────────────────────────
@@ -360,6 +366,10 @@ class ManagedBot {
     this._invCache = null;
     this._afkClickUntil = 0;
     this._afkClickTimer = null;
+    this._afkSequence = null;
+    this._afkTeleportTimer = null;
+    this._afkWalkTimer = null;
+    this._afkWalkPaused = false;
 
     this.addLog('info', `Bot created for ${this.host}:${this.port}`);
   }
@@ -600,6 +610,18 @@ class ManagedBot {
 
   _stopAfk() {
     if (this._afkTimer) { clearInterval(this._afkTimer); this._afkTimer = null; }
+    this._cancelAfkSequence();
+  }
+
+  // Cancel the /afk → countdown → arena walk sequence and release movement.
+  _cancelAfkSequence() {
+    if (this._afkTeleportTimer) { clearInterval(this._afkTeleportTimer); this._afkTeleportTimer = null; }
+    if (this._afkWalkTimer) { clearInterval(this._afkWalkTimer); this._afkWalkTimer = null; }
+    this._afkWalkPaused = false;
+    if (this._afkSequence && !this._afkSequence.walked && this.bot) {
+      try { this.bot.clearControlState('forward'); } catch (_) {}
+    }
+    this._afkSequence = null;
   }
 
   // ── lifecycle ──
@@ -846,6 +868,10 @@ class ManagedBot {
       }
 
       if (!firstSpawn) this.addLog('info', 'Spawned again (sub-server transfer).');
+      // A dimension/world change after the AFK countdown is a teleport signal.
+      if (this._afkSequence && !this._afkSequence.teleported && !this._afkSequence.walked && now() - this._afkSequence.armedAt > 4000) {
+        this._afkTeleportDetected('world change');
+      }
     });
 
     bot.on('death', () => {
@@ -1025,6 +1051,13 @@ class ManagedBot {
       }
     }
     if (this._verifying) return;
+
+    // Server announcement confirming the arena teleport (ignore player chat).
+    if (this._afkSequence && !this._afkSequence.teleported && !this._afkSequence.walked &&
+        /\b(?:afk[ -]?arena|teleported successfully|teleport(?:ed)? to (?:the )?afk)\b/i.test(message) &&
+        !/^[A-Za-z0-9_.]{1,16}\s*:/.test(message)) {
+      this._afkTeleportDetected('server message');
+    }
 
     // Login success?
     if (!this.loggedIn && LOGIN_SUCCESS.some((r) => r.test(message))) {
@@ -1238,7 +1271,7 @@ class ManagedBot {
     let step = 0;
     this._afkTimer = setInterval(() => {
       if (!this.bot || !this.bot.entity) return;
-      if (this._verifying) return;
+      if (this._verifying || this._afkWalkPaused) return;
       try {
         this.bot.swingArm('right');
         this.bot.look(Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.6, false);
@@ -1287,7 +1320,7 @@ class ManagedBot {
     if (!window || now() > this._afkClickUntil) return;
     this._afkClickUntil = 0;
     let title = '';
-    try { title = String(window.title || '').replace(/§[0-9a-fk-or]/gi, ''); } catch (_) {}
+    try { title = stripColor(chatText(window.title) || String(window.title || '')).slice(0, 80); } catch (_) {}
     this.addLog('info', `AFK GUI opened${title ? `: ${title.slice(0, 60)}` : ''} — clicking slot 1 in 0.4s.`);
     if (this._afkClickTimer) clearTimeout(this._afkClickTimer);
     this._afkClickTimer = setTimeout(() => {
@@ -1296,10 +1329,147 @@ class ManagedBot {
       try {
         this.bot.clickWindow(0, 0, 0);
         this.addLog('ok', 'AFK: clicked the first slot automatically.');
+        this._startAfkSequence();
       } catch (e) {
         this.addLog('err', `AFK auto-click failed: ${e.message || e}`);
       }
     }, 400);
+  }
+
+  // ── /afk → GUI click → countdown → arena → one random walk ──
+  // Movement is plain walking. No block is mined, dug or placed.
+  _startAfkSequence() {
+    this._cancelAfkSequence();
+    const p = this.bot && this.bot.entity && this.bot.entity.position;
+    const dim = this.bot && this.bot.game && this.bot.game.dimension;
+    this._afkSequence = {
+      armedAt: now(),
+      origin: p ? { x: p.x, y: p.y, z: p.z } : null,
+      dimension: dim == null ? null : dim,
+      teleported: false,
+      walked: false,
+    };
+    this.addLog('info', 'AFK: countdown 5 → 4 → 3 → 2 → 1, waiting for the arena teleport.');
+    for (let n = 5; n >= 1; n--) {
+      this._later(() => {
+        const seq = this._afkSequence;
+        if (!seq || seq.teleported) return;
+        this.addLog('info', `AFK: ${n}`);
+        if (n === 1) this._watchAfkTeleport();
+      }, (6 - n) * 1000);
+    }
+  }
+
+  _watchAfkTeleport() {
+    const seq = this._afkSequence;
+    if (!seq || seq.teleported || this._afkTeleportTimer) return;
+    const deadline = now() + AFK_TELEPORT_WATCH_MS;
+    this._afkTeleportTimer = setInterval(() => {
+      const s = this._afkSequence;
+      if (!s) { this._cancelAfkSequence(); return; }
+      if (!this.bot || !this.bot.entity) return;
+      const p = this.bot.entity.position;
+      let moved = 0;
+      let height = 0;
+      if (s.origin) {
+        moved = Math.hypot(p.x - s.origin.x, p.z - s.origin.z);
+        height = Math.abs(p.y - s.origin.y);
+      }
+      const dim = this.bot.game && this.bot.game.dimension;
+      const dimChanged = s.dimension != null && dim != null && dim !== s.dimension;
+      if (moved >= 10 || height >= 8 || dimChanged) {
+        this._afkTeleportDetected(moved >= 10 ? `moved ${moved.toFixed(1)} blocks` : dimChanged ? 'world changed' : 'height changed');
+        return;
+      }
+      if (now() > deadline) {
+        this._cancelAfkSequence();
+        this.addLog('warn', 'AFK: no arena teleport detected — skipping the one-time move.');
+      }
+    }, 500);
+  }
+
+  _afkTeleportDetected(reason) {
+    const seq = this._afkSequence;
+    if (!seq || seq.teleported || seq.walked) return;
+    seq.teleported = true;
+    if (this._afkTeleportTimer) { clearInterval(this._afkTeleportTimer); this._afkTeleportTimer = null; }
+    this.addLog('ok', `AFK: arena reached (${reason}) — moving ${AFK_WALK_MIN}–${AFK_WALK_MAX} blocks in a random direction once.`);
+    this._later(() => this._afkWalkOnce(), 1500);
+  }
+
+  _afkWalkOnce() {
+    const seq = this._afkSequence;
+    if (!seq || !seq.teleported || seq.walked || !this.bot || !this.bot.entity) return;
+    seq.walked = true;
+    this._afkWalkPaused = true;
+    this._afkTarget = AFK_WALK_MIN + Math.floor(Math.random() * (AFK_WALK_MAX - AFK_WALK_MIN + 1));
+    this._afkWalkMoved = 0;
+    this._afkWalkLegs = 0;
+    this._afkWalkDeadline = now() + 26000;
+    this.addLog('info', `AFK arena: one random walk of ${this._afkTarget} blocks (no mining).`);
+    this._startAfkWalkLeg();
+  }
+
+  _startAfkWalkLeg() {
+    const b = this.bot;
+    if (!b || !b.entity) { this._finishAfkWalk('disconnected'); return; }
+    if (this._afkWalkMoved >= this._afkTarget) { this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} blocks`); return; }
+    if (this._afkWalkLegs >= 10 || now() > this._afkWalkDeadline) {
+      // Small AFK arenas cannot always fit the full random distance. Reaching
+      // the requested minimum is still a successful one-time move.
+      const ok = this._afkWalkMoved >= AFK_WALK_MIN;
+      this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} blocks (target ${this._afkTarget}${ok ? ', arena limit' : ', arena blocked'})`);
+      return;
+    }
+    this._afkWalkLegs++;
+    const yaw = Math.random() * Math.PI * 2;
+    const start = { x: b.entity.position.x, z: b.entity.position.z };
+    const fx = -Math.sin(yaw);
+    const fz = -Math.cos(yaw);
+    const legDeadline = Math.min(now() + 1800, this._afkWalkDeadline);
+    try {
+      b.look(yaw, 0, true);
+      b.setControlState('forward', true);
+    } catch (e) {
+      this._finishAfkWalk(`could not start walking: ${(e && e.message) || e}`);
+      return;
+    }
+    this._afkWalkTimer = setInterval(() => {
+      const bot = this.bot;
+      if (!bot || !bot.entity) { this._finishAfkWalk('disconnected'); return; }
+      const p = bot.entity.position;
+      const legMoved = Math.hypot(p.x - start.x, p.z - start.z);
+      // Never step into a hole / lava. Only loaded, air-like floor blocks
+      // stop us, so chunk loading cannot stall the walk.
+      try {
+        const floor = bot.blockAt(p.offset(fx * 1.4, -1, fz * 1.4));
+        if (floor && /^(air|cave_air|void_air|lava|flowing_lava|fire)$/i.test(String(floor.name || ''))) {
+          this._endAfkWalkLeg(legMoved);
+          return;
+        }
+      } catch (_) {}
+      if (legMoved >= this._afkTarget - this._afkWalkMoved || now() > legDeadline) {
+        this._endAfkWalkLeg(legMoved);
+      }
+    }, 150);
+  }
+
+  _endAfkWalkLeg(legMoved) {
+    if (this._afkWalkTimer) { clearInterval(this._afkWalkTimer); this._afkWalkTimer = null; }
+    try { if (this.bot) this.bot.clearControlState('forward'); } catch (_) {}
+    this._afkWalkMoved += legMoved;
+    if (this._afkWalkMoved >= this._afkTarget) {
+      this._finishAfkWalk(`${this._afkWalkMoved.toFixed(1)} blocks in ${this._afkWalkLegs} random direction${this._afkWalkLegs === 1 ? '' : 's'}`);
+      return;
+    }
+    this._later(() => this._startAfkWalkLeg(), 250);
+  }
+
+  _finishAfkWalk(reason) {
+    if (this._afkWalkTimer) { clearInterval(this._afkWalkTimer); this._afkWalkTimer = null; }
+    this._afkWalkPaused = false;
+    try { if (this.bot) this.bot.clearControlState('forward'); } catch (_) {}
+    this.addLog('ok', `AFK arena: random walk finished — ${reason}.`);
   }
 
   switchNow() {
