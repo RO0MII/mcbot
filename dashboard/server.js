@@ -25,6 +25,7 @@ const path = require('path');
 const crypto = require('crypto');
 const mineflayer = require('mineflayer');
 const proxyPool = require('./proxy-pool');
+const { isLocalTarget } = proxyPool;
 
 // Velocity rate-limits joins per IP ("Papyrus — You're connecting too quickly").
 // Ten bots retrying together therefore never get in. This gate spaces every
@@ -633,13 +634,22 @@ class ManagedBot {
       }
     }
     const gen = (this._gen = (this._gen || 0) + 1);
-    // A route verified against a different game server is not necessarily
-    // any use here — retarget the pool when a bot uses another endpoint.
-    if (this.host && proxyPool.target && proxyPool.target.host !== this.host) {
+    // Webshare tunnels dial this bot's own host:port, so the public pool's
+    // validation target is irrelevant while the rotating provider is active.
+    if (!proxyPool.webshareActive() && this.host && proxyPool.target
+        && proxyPool.target.host !== this.host) {
       this.addLog('info', `Verifying proxy routes against ${this.host}…`);
       proxyPool.setTarget(this.host, this.port);
     }
-    const px = this._directNext ? null : proxyPool.pick(this.id, this.name);
+    // Local/private servers (LAN test boxes, localhost) go straight out —
+    // a public proxy cannot reach them and there is no reason to try.
+    const localTarget = isLocalTarget(this.host);
+    if (localTarget && !this._localNoted) {
+      proxyPool.release(this.id); // do not keep a stale tunnel/route pin
+      this.addLog('info', `Local/private target ${this.host} — connecting direct without a proxy.`);
+      this._localNoted = true;
+    }
+    const px = (this._directNext || localTarget) ? null : proxyPool.pick(this.id, this.name);
     this._directNext = false;
     if (!px) return this._connectNow(null);
 
@@ -659,7 +669,9 @@ class ManagedBot {
       proxyPool.release(this.id);
       const why = clean(err && err.message || err, 80);
       this._proxyTries++;
-      if (this._proxyTries < 3 && proxyPool.summary().total) {
+      // A rotating tunnel is retried even when the public pool is empty —
+      // otherwise a fresh-IP route would be skipped on the first failure.
+      if (this._proxyTries < 3 && px && (px.virtual || proxyPool.summary().total)) {
         this.addLog('warn', `${routeLabel} unreachable (${why}) — trying another route.`);
         this._later(() => this._connect(), 600);
         return;
@@ -712,7 +724,11 @@ class ManagedBot {
         catch (e) { try { client.emit('error', e); } catch (_) {} }
       };
     }
-    this.proxy = proxy ? { ip: proxy.ip, port: proxy.port, latency: proxy.latency, key: proxy.ip + ':' + proxy.port } : null;
+    this.proxy = proxy ? {
+      ip: proxy.ip, port: proxy.port, latency: proxy.latency,
+      key: proxy.key || (proxy.ip + ':' + proxy.port),
+      virtual: !!proxy.virtual, protocol: proxy.protocol || 'socks5',
+    } : null;
     this.proxySince = proxy ? now() : null;
 
     let bot;
@@ -2258,7 +2274,7 @@ function boot() {
   const poolReady = proxyPool.init({
     dataDir: DATA_DIR,
     target: {
-      host: process.env.PROXY_TARGET_HOST || (firstBot && firstBot.host) || 'mc.hungrybirds.org',
+      host: process.env.PROXY_TARGET_HOST || (firstBot && firstBot.host) || '',
       port: parseInt(process.env.PROXY_TARGET_PORT || String((firstBot && firstBot.port) || 25565), 10),
     },
     botIds: () => Array.from(manager.bots.keys()),

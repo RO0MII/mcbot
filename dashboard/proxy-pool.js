@@ -39,6 +39,31 @@ const DEFAULTS = {
 
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 
+/**
+ * Local/private destinations must never be sent through a public proxy —
+ * most providers refuse them, and there is nothing to gain by hiding them.
+ * Works for IP literals and the usual local hostnames without a DNS lookup.
+ */
+function isLocalTarget(host) {
+  const h = String(host || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!h || h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (h.endsWith('.local') || h.endsWith('.internal')) return true;
+  const ip = net.isIP(h);
+  if (!ip) return false;
+  if (ip === 4) {
+    const a = h.split('.').map(Number);
+    return a[0] === 0 || a[0] === 10 || a[0] === 127
+      || (a[0] === 169 && a[1] === 254)
+      || (a[0] === 172 && a[1] >= 16 && a[1] <= 31)
+      || (a[0] === 192 && a[1] === 168)
+      || (a[0] === 100 && a[1] >= 64 && a[1] <= 127); // CGNAT
+  }
+  const v = h.toLowerCase();
+  return v === '::1' || v === '::' || v.startsWith('fc') || v.startsWith('fd')
+    || v.startsWith('fe8') || v.startsWith('fe9') || v.startsWith('fea') || v.startsWith('feb')
+    || /^::ffff:(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(v);
+}
+
 /* ── tiny SOCKS5 client ──────────────────────────────────────────────────── */
 
 function socks5Connect(proxy, host, port, timeoutMs) {
@@ -264,6 +289,10 @@ class ProxyPool {
     } catch (e) { this.lastError = 'webshare save: ' + e.message; }
   }
 
+  webshareActive() {
+    return !!(this.webshare.enabled && this.webshare.username);
+  }
+
   setWebshare(on) {
     this.webshare.enabled = !!on;
     if (!this.webshare.enabled) {
@@ -271,10 +300,12 @@ class ProxyPool {
       this.assignments.forEach((key, botId) => {
         if (key.indexOf('webshare:') === 0) this.assignments.delete(botId);
       });
+      // The public pool was idle while Webshare was on — make it usable again.
+      if (this.opts.enabled && this.target.host) this.refresh(true).catch(() => {});
     }
     this._saveWebshare();
     this._save();
-    return this.webshare.enabled && !!this.webshare.username;
+    return this.webshareActive();
   }
 
   /* ── persistence ── */
@@ -427,6 +458,9 @@ class ProxyPool {
   async refresh(force) {
     if (this.refreshing) return this.status();
     if (!this.opts.enabled) return this.status();
+    // Rotating tunnels do not use the public pool — no point validating
+    // hundreds of SOCKS5 routes against another server in the background.
+    if (this.webshareActive() && !force) return this.status();
     if (!this.target.host) return this.status();
     if (!force && Date.now() - this.lastRefresh < 60000) return this.status();
     this.refreshing = true;
@@ -449,6 +483,7 @@ class ProxyPool {
   }
 
   async _revalidateCached() {
+    if (this.webshareActive()) return;
     if (!this.alive.size || !this.target.host) return;
     const list = Array.from(this.alive.values()).map((p) => ({ host: p.host, port: p.port, source: p.source }));
     const ok = await this._validate(list, 'cached');
@@ -533,7 +568,7 @@ class ProxyPool {
     if (!this.opts.enabled) return null;
     if (name) this.names.set(botId, name);
     this._pruneAssignments();
-    if (this.webshare.enabled && this.webshare.username) {
+    if (this.webshareActive()) {
       // Every CONNECT to the rotating endpoint exits at a different IP, so
       // each bot gets its own tunnel and its own address.
       const key = 'webshare:' + botId;
@@ -689,3 +724,5 @@ class ProxyPool {
 
 module.exports = new ProxyPool();
 module.exports.socks5Connect = socks5Connect;
+module.exports.httpConnect = httpConnect;
+module.exports.isLocalTarget = isLocalTarget;
