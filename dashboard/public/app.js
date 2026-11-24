@@ -33,6 +33,16 @@ const statusMeta = (bot) => ({
   stopped: { label: 'Stopped', pill: 'pill--stopped', dot: 'stopped' },
   offline: { label: 'Offline', pill: 'pill--offline', dot: 'stopped' },
 })[bot && bot.status] || { label: 'Offline', pill: 'pill--offline', dot: 'stopped' };
+
+function appealDraft(bot) {
+  const text = (bot && bot.banText) || '';
+  const id = text.match(/ID:\s*(#\d+)/i);
+  return 'Hi staff,\n\n'
+    + 'I understand I broke the chat rules by using inappropriate language, and I am sorry. '
+    + 'I have stopped the bots and I will not repeat it.\n\n'
+    + (id ? 'My ban ID is ' + id[1] + '. ' : '')
+    + 'Could you please review it and consider unbanning me? I will follow the rules going forward.\n\nThank you.';
+}
 const isActive = (bot) => !!bot && ['online', 'connecting', 'reconnecting', 'banned'].includes(bot.status);
 const findBot = (id) => (state.bots || []).find((b) => b.id === id) || null;
 const initial = (name) => String(name || '?').trim().charAt(0).toUpperCase() || '?';
@@ -753,7 +763,11 @@ function playerCardHtml(bot) {
     + '<button class="btn btn-primary btn-sm" data-action="add">' + icon('plus') + '<span>New bot</span></button>'
     + '</div>'
     + '<div class="pcard__alert' + (bot.banned ? '' : ' hidden') + '" data-f="pc-alert">' + icon('alert')
-    + '<div><b>Banned by the server</b><span data-f="pc-alert-text">' + esc(bot.banText || '') + '</span></div></div>'
+    + '<div><b data-f="pc-alert-title">' + (bot.permanentBan ? 'Permanently banned — auto-reconnect paused' : 'Banned by the server') + '</b>'
+    + '<span data-f="pc-alert-text">' + esc(bot.banText || '') + '</span>'
+    + (bot.appealUrl ? '<div class="pcard__alert-actions"><a class="btn btn-ghost btn-sm" href="' + esc(bot.appealUrl) + '" target="_blank" rel="noopener">Contact staff</a>'
+      + '<button class="btn btn-ghost btn-sm" type="button" data-action="copy-appeal" data-id="' + esc(bot.id) + '">Copy appeal</button></div>' : '')
+    + '</div></div>'
     + '</section>';
 }
 
@@ -837,6 +851,9 @@ function patchBotPage(bot) {
     alertEl.classList.toggle('hidden', !bot.banned);
     const at = alertEl.querySelector('[data-f="pc-alert-text"]');
     if (at && bot.banned && at.textContent !== (bot.banText || '')) at.textContent = bot.banText || '';
+    const title = alertEl.querySelector('[data-f="pc-alert-title"]');
+    const nextTitle = bot.permanentBan ? 'Permanently banned — auto-reconnect paused' : 'Banned by the server';
+    if (title && title.textContent !== nextTitle) title.textContent = nextTitle;
   }
   const route = root.querySelector('[data-f="pc-route"]');
   if (route) {
@@ -1257,6 +1274,22 @@ function handleAction(action, el) {
   const act = () => {
     if (action === 'toggle' && id) { const bot = findBot(id); const stop = !bot || bot.status === 'online'; return api('/api/bots/' + id + '/' + (stop ? 'stop' : 'start'), { method: 'POST', body: JSON.stringify({}) }).then(() => renderAll()).catch((e) => toast('err', 'Action failed', e.message)); }
     if (action === 'restart' && id) { return api('/api/bots/' + id + '/restart', { method: 'POST', body: JSON.stringify({}) }).then(() => { renderAll(); toast('ok', 'Restarting', 'Bot is reconnecting…'); }).catch((e) => toast('err', 'Action failed', e.message)); }
+    if (action === 'copy-appeal' && id) {
+      const bot = findBot(id);
+      const text = appealDraft(bot);
+      const done = () => toast('ok', 'Appeal copied', 'Paste it into the staff ticket.');
+      const fallback = () => {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); }
+        catch (e) { toast('err', 'Copy failed', 'Select the message above and copy it manually.'); }
+        ta.remove();
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(fallback);
+      else fallback();
+      return Promise.resolve();
+    }
     if (action === 'auto-eat' && id) { return api('/api/bots/' + id + '/auto-eat', { method: 'POST', body: JSON.stringify({}) }).then(() => { renderAll(); toast('ok', 'Auto-eat', 'Toggled.'); }).catch((e) => toast('err', 'Action failed', e.message)); }
     if (action === 'console' && id) { state.botId = id; switchView('bot'); return Promise.resolve(); }
     if (action === 'bot-page' && id) { state.botId = id; switchView('bot'); return Promise.resolve(); }

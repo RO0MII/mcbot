@@ -1663,3 +1663,7 @@ a { color: inherit; }
 .pxwarn .ico { width: 18px; height: 18px; color: var(--gold); flex: none; }
 .pxwarn b { color: var(--gold-2); }
 .pxwarn span { flex: 1 1 260px; }
+
+/* ── ban appeal ─────────────────────────────────────────────────────────── */
+.pcard__alert-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.pcard__alert-actions .btn { text-decoration: none; }

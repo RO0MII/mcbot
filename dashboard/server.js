@@ -317,6 +317,8 @@ class ManagedBot {
     this._banText = '';
     this._sawKick = false;
     this._lastKick = '';
+    this._permanentBan = false;
+    this._pauseLogged = false;
     this._proxyTries = 0;
     this._diagDone = false;
     this._gateTimer = null;
@@ -454,6 +456,8 @@ class ManagedBot {
       proxySince: this.proxySince,
       banned: !!this._banText,
       banText: this._banText,
+      permanentBan: !!this._permanentBan,
+      appealUrl: (this._banText.match(/https?:\/\/[^\s]+/i) || [null])[0],
       lastKick: this._lastKick || null,
       loggedIn: this.loggedIn,
       loginAttempts: this.loginAttempts,
@@ -567,6 +571,8 @@ class ManagedBot {
     if (this.wanted && this.bot) return;
     this.wanted = true;
     this._loginGaveUp = false;
+    this._permanentBan = false;
+    this._pauseLogged = false;
     this._proxyTries = 0;
     this.addLog('info', 'Starting bot…');
     this._connect();
@@ -602,6 +608,8 @@ class ManagedBot {
     const wasWanted = true;
     this.stop('Restarting…');
     this.wanted = wasWanted;
+    this._permanentBan = false;
+    this._pauseLogged = false;
     this._later(() => this._connect(), 700);
   }
 
@@ -748,6 +756,8 @@ class ManagedBot {
       this._rateLimitedUntil = 0;
       this._bannedUntil = 0;
       this._banText = '';
+      this._permanentBan = false;
+      this._pauseLogged = false;
       this._diagDone = false;
       this.setStatus('online', 'Online');
       this.addLog('ok', `Joined ${this.host}:${this.port} as ${this.name}`);
@@ -818,8 +828,15 @@ class ManagedBot {
       const r = (chatText(reason) || stripColor(String(reason || ''))).slice(0, 600);
       if (/banned/i.test(r)) {
         this._banText = stripColor(r).replace(/\s+/g, ' ').trim().slice(0, 400);
-        this._bannedUntil = now() + 30 * 60 * 1000;
+        // A staff ban is not a cooldown. Stop retrying forever and let the
+        // user resolve it through the server's appeal channel.
+        this._permanentBan = /permanently banned|ip-banned by an operator|appeal at/i.test(r);
+        this._bannedUntil = this._permanentBan ? 0 : now() + 30 * 60 * 1000;
         blockConnectGate(120000);
+        // Some servers send the kick packet but leave the socket open. Close it
+        // ourselves so the ban settles immediately instead of looking like a
+        // generic join timeout.
+        this._later(() => { try { if (this.bot) this.bot.end('Banned by server'); } catch (_) {} }, 300);
       }
       if (/slow down|connecting too quickly|too many connections|rate.?limit|throttl|too fast|try again later|too many login/i.test(r)) {
         this._throttleHits = (this._throttleHits || 0) + 1;
@@ -901,6 +918,15 @@ class ManagedBot {
   }
 
   _scheduleReconnect(delay) {
+    if (this._permanentBan) {
+      this.nextRetryAt = null;
+      this.setStatus('banned', 'Permanently banned — appeal required');
+      if (!this._pauseLogged) {
+        this._pauseLogged = true;
+        this.addLog('warn', 'Auto-reconnect paused after a permanent ban. Use the appeal link in the player card — restart only after staff clears it.');
+      }
+      return;
+    }
     if (!this.wanted || !this.autoReconnect) {
       if (this.wanted) {
         this.setStatus('offline', 'Offline (auto-reconnect off)');
