@@ -627,7 +627,7 @@ class ManagedBot {
     if (this._afkWalkTimer) { clearInterval(this._afkWalkTimer); this._afkWalkTimer = null; }
     this._afkWalkPaused = false;
     if (this._afkSequence && !this._afkSequence.walked && this.bot) {
-      try { this.bot.clearControlState('forward'); } catch (_) {}
+      try { this.bot.setControlState('forward', false); } catch (_) {}
     }
     if (this.bot && this.bot.pathfinder) {
       try { this.bot.pathfinder.setGoal(null); } catch (_) {}
@@ -1472,9 +1472,9 @@ class ManagedBot {
     try {
       b.look(yaw, 0, true);
       b.setControlState('forward', true);
-      b.clearControlState('sprint');
-    } catch (_) {
-      this._finishAfkWalk('walking controls unavailable');
+      b.setControlState('sprint', false);
+    } catch (e) {
+      this._finishAfkWalk(`walking controls unavailable: ${e && e.message ? e.message : e}`);
       return;
     }
     this._afkWalkTimer = setTimeout(() => {
@@ -1507,8 +1507,8 @@ class ManagedBot {
     try { if (this.bot && this.bot.pathfinder) this.bot.pathfinder.setGoal(null); } catch (_) {}
     try {
       if (this.bot) {
-        this.bot.clearControlState('forward');
-        this.bot.clearControlState('sprint');
+        this.bot.setControlState('forward', false);
+        this.bot.setControlState('sprint', false);
       }
     } catch (_) {}
     this.addLog('ok', `AFK arena: one-time walk finished — ${reason}.`);
