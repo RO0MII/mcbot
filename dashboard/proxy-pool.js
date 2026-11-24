@@ -140,6 +140,7 @@ class ProxyPool {
     this.alive = new Map();       // key -> { key, host, port, latency, okAt, fails, source }
     this.assignments = new Map(); // botId -> key
     this.names = new Map();       // botId -> bot name (display only)
+    this._botIds = null;          // live bot ids, supplied by the server
     this.lastRefresh = 0;
     this.refreshing = false;
     this.lastError = '';
@@ -148,11 +149,13 @@ class ProxyPool {
     this.log = () => {};
   }
 
-  init({ dataDir, target, log }) {
+  init({ dataDir, target, log, botIds }) {
     if (log) this.log = log;
+    if (typeof botIds === 'function') this._botIds = botIds;
     if (target && target.host) this.target = { host: target.host, port: target.port || 25565 };
     this.file = path.join(dataDir, 'proxies.json');
     this._load();
+    this._pruneAssignments(); // drop pins belonging to bots that no longer exist
     this._schedule();
     // Re-validate the cached list (fast, a couple of seconds) so the first
     // connections can already use a route. Fresh discovery runs in parallel.
@@ -398,22 +401,38 @@ class ProxyPool {
     return rec;
   }
 
-  // If a proxy vanished, its bots must be re-homed for the next connect.
+  // Keep the pin table honest: no dead routes, no deleted bots, no duplicate
+  // pins, never more than maxPerIp bots on the same address. Stale pins were
+  // the reason removed bots kept holding IPs (and new bots shared the rest).
   _pruneAssignments() {
     let changed = false;
+    const validIds = this._botIds ? new Set(this._botIds()) : null;
+    const usedKeys = new Set();
+    const perIp = new Map();
     this.assignments.forEach((key, botId) => {
-      if (!this.alive.has(key)) { this.assignments.delete(botId); changed = true; }
+      const p = this.alive.get(key);
+      if (!p || (validIds && !validIds.has(botId)) || usedKeys.has(key)
+          || (perIp.get(p.host) || 0) >= this.opts.maxPerIp) {
+        this.assignments.delete(botId);
+        changed = true;
+        return;
+      }
+      usedKeys.add(key);
+      perIp.set(p.host, (perIp.get(p.host) || 0) + 1);
     });
     if (changed) this._save();
   }
 
   /* ── assignment ── */
-  _counts(exceptKey) {
+  /** Pin usage counted by real IP, not by host:port — two ports on one box
+   *  still mean one egress address. */
+  _ipCounts(exceptBotId) {
     const counts = new Map();
     this.assignments.forEach((key, botId) => {
-      if (key === exceptKey) return;
-      if (!this.alive.has(key)) return;
-      counts.set(key, (counts.get(key) || 0) + 1);
+      if (botId === exceptBotId) return;
+      const p = this.alive.get(key);
+      if (!p) return;
+      counts.set(p.host, (counts.get(p.host) || 0) + 1);
     });
     return counts;
   }
@@ -422,6 +441,7 @@ class ProxyPool {
   pick(botId, name) {
     if (!this.opts.enabled) return null;
     if (name) this.names.set(botId, name);
+    this._pruneAssignments();
     const assigned = this.assignments.get(botId);
     if (assigned) {
       const p = this.alive.get(assigned);
@@ -429,14 +449,16 @@ class ProxyPool {
       this.assignments.delete(botId);
     }
     if (!this.alive.size) return null;
-    const counts = this._counts(null);
-    // Pack, don't spread: fill the fullest route that still has a free slot, so
-    // ten bots land on 5 + 5 rather than ten separate addresses.
+    const perIp = this._ipCounts(botId);
     const candidates = Array.from(this.alive.values())
-      .filter((p) => (counts.get(p.key) || 0) < this.opts.maxPerIp)
-      .sort((a, b) => (counts.get(b.key) || 0) - (counts.get(a.key) || 0) || a.latency - b.latency);
+      .filter((p) => (perIp.get(p.host) || 0) < this.opts.maxPerIp);
     if (!candidates.length) return null;
-    const chosen = candidates[0];
+    // Spread, don't pack. With maxPerIp=1 every route starts at zero, so a
+    // latency sort would hand the SAME fastest IP to every bot. Prefer an
+    // unused address and choose randomly among them instead.
+    const free = candidates.filter((p) => !perIp.has(p.host));
+    const pool = free.length ? free : candidates;
+    const chosen = pool[Math.floor(Math.random() * pool.length)];
     this.assignments.set(botId, chosen.key);
     this._save();
     return this._public(chosen);
@@ -512,9 +534,15 @@ class ProxyPool {
 
   status() {
     const botsByKey = new Map();
+    const perIp = new Map();
+    let collisions = 0;
     this.assignments.forEach((key, botId) => {
       if (!botsByKey.has(key)) botsByKey.set(key, []);
       botsByKey.get(key).push(this.names.get(botId) || botId);
+      const p = this.alive.get(key);
+      if (!p) return;
+      perIp.set(p.host, (perIp.get(p.host) || 0) + 1);
+      if (perIp.get(p.host) > 1) collisions++;
     });
     const proxies = Array.from(this.alive.values())
       .sort((a, b) => a.latency - b.latency)
@@ -533,6 +561,8 @@ class ProxyPool {
       maxPerIp: this.opts.maxPerIp,
       total: this.alive.size,
       assigned: this.assignments.size,
+      uniqueIps: perIp.size,
+      collisions,
       refreshing: this.refreshing,
       lastRefresh: this.lastRefresh,
       nextRefresh: this.lastRefresh ? this.lastRefresh + this.opts.refreshMs : null,

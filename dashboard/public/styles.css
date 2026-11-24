@@ -1632,3 +1632,34 @@ a { color: inherit; }
 @media (max-width: 640px) {
   .fleet__note { font-size: 10.5px; }
 }
+
+/* ── remove bots ───────────────────────────────────────────────────────── */
+.fleet__headline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.icon-btn--danger { color: var(--faint); }
+.icon-btn--danger:hover { color: var(--gold); border-color: var(--gold-line); background: var(--gold-soft); box-shadow: 0 0 24px -12px rgba(255, 214, 10, 0.7); }
+.btn-danger-ghost { color: var(--muted); border-color: var(--line-2); }
+.btn-danger-ghost .ico { color: var(--gold); }
+.btn-danger-ghost:hover { color: var(--gold-2); border-color: var(--gold-line); background: var(--gold-soft); box-shadow: none; }
+.btn-danger {
+  background: linear-gradient(135deg, #b45309, #d97706);
+  color: #fff; box-shadow: 0 18px 38px -18px rgba(217, 119, 6, 0.9);
+}
+.btn-danger:hover { background: linear-gradient(135deg, #d97706, #f59e0b); transform: translateY(-1px); }
+.modal-card--sm { width: min(440px, 100%); }
+.confirm__body {
+  display: flex; align-items: flex-start; gap: 10px; margin: 2px 0 20px;
+  font: 500 12.5px/1.6 var(--font-body); color: var(--muted);
+}
+.confirm__body .ico { width: 18px; height: 18px; color: var(--gold); flex: none; margin-top: 1px; }
+
+/* ── route collision guard ─────────────────────────────────────────────── */
+.pxwarn {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 14px; padding: 11px 14px;
+  border: 1px solid var(--gold-line); border-radius: 13px;
+  background: var(--gold-soft); color: var(--muted);
+  font: 500 12px/1.5 var(--font-body);
+}
+.pxwarn .ico { width: 18px; height: 18px; color: var(--gold); flex: none; }
+.pxwarn b { color: var(--gold-2); }
+.pxwarn span { flex: 1 1 260px; }

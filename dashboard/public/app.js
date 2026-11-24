@@ -212,8 +212,10 @@ const state = {
 /* ── api ── */
 async function api(path, opts) {
   opts = opts || {};
-  const options = { credentials: 'same-origin' };
-  if (opts.body) { options.method = opts.method || 'POST'; options.headers = { 'Content-Type': 'application/json' }; options.body = typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body); }
+  // Always honour an explicit method — a DELETE/POST with no body must not
+  // silently become a GET. That made the delete buttons appear to do nothing.
+  const options = { credentials: 'same-origin', method: opts.method || (opts.body != null ? 'POST' : 'GET') };
+  if (opts.body != null) { options.headers = { 'Content-Type': 'application/json' }; options.body = typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body); }
   const res = await fetch(path, options);
   let data = null;
   try { data = await res.json(); } catch (e) { data = null; }
@@ -533,7 +535,8 @@ function dashboardHtml() {
     + '<section class="panel"><div class="panel__head"><div><div class="panel__title">' + icon('server') + '<h3>Server pulse</h3></div><p class="panel__sub">Every endpoint your bots sit on.</p></div><span class="panel__tag">' + s.servers + ' live</span></div><div class="pulse-list" id="pulse-body" data-sig="' + esc(pulseSig()) + '">' + pulseBodyHtml() + '</div></section>'
     + '</div>'
     + '<section class="fleet">'
-    + '<div class="fleet__head"><div><h2>Your bots</h2><p><span id="fleet-count">' + shown + '</span> of ' + state.bots.length + ' shown · live updates</p></div>'
+    + '<div class="fleet__head"><div class="fleet__headline"><div><h2>Your bots</h2><p><span id="fleet-count">' + shown + '</span> of ' + state.bots.length + ' shown · live updates</p></div>'
+    + (state.bots.length ? '<button class="btn btn-ghost btn-sm btn-danger-ghost" data-action="clear-all">' + icon('trash') + '<span>Remove all</span></button>' : '') + '</div>'
     + '<div class="fleet__tools"><label class="search" style="width:auto;flex:1 1 190px"><svg class="ico"><use href="#i-search"></use></svg><input data-search type="search" placeholder="Search bots or IPs…" autocomplete="off" aria-label="Search bots" value="' + esc(state.query) + '" /></label>'
     + '<div class="chips"><button class="chip ' + (state.filter === 'all' ? 'is-active' : '') + '" data-filter="all">All</button><button class="chip ' + (state.filter === 'online' ? 'is-active' : '') + '" data-filter="online">Online</button><button class="chip ' + (state.filter === 'offline' ? 'is-active' : '') + '" data-filter="offline">Offline</button></div></div></div>'
     + '<div id="bot-grid-wrap">' + gridHtml() + '</div>'
@@ -611,6 +614,7 @@ function botCard(bot) {
     + '<button class="btn btn-ghost btn-sm" data-action="console" data-id="' + esc(bot.id) + '">' + icon('terminal') + '<span>Console</span></button>'
     + '<button class="icon-btn" data-action="bot-page" data-id="' + esc(bot.id) + '" title="Open full page" aria-label="Open ' + esc(bot.name) + '">' + icon('arrow') + '</button>'
     + '<button class="icon-btn" data-action="restart" data-id="' + esc(bot.id) + '" title="Restart" aria-label="Restart ' + esc(bot.name) + '">' + icon('restart') + '</button>'
+    + '<button class="icon-btn icon-btn--danger" data-action="delete-bot" data-id="' + esc(bot.id) + '" title="Delete bot" aria-label="Delete ' + esc(bot.name) + '">' + icon('trash') + '</button>'
     + '</div>'
     + '</article>';
 }
@@ -744,6 +748,7 @@ function playerCardHtml(bot) {
     + '<button class="btn btn-ghost btn-sm" data-action="toggle" data-id="' + esc(bot.id) + '">' + icon(isActive(bot) ? 'stop' : 'play') + '<span>' + (isActive(bot) ? 'Stop' : 'Start') + '</span></button>'
     + '<button class="btn btn-ghost btn-sm" data-action="restart" data-id="' + esc(bot.id) + '">' + icon('restart') + '<span>Restart</span></button>'
     + '<button class="btn btn-ghost btn-sm" data-action="auto-eat" data-id="' + esc(bot.id) + '">' + icon('zap') + '<span>Auto-eat</span></button>'
+    + '<button class="btn btn-ghost btn-sm btn-danger-ghost" data-action="delete-bot" data-id="' + esc(bot.id) + '">' + icon('trash') + '<span>Delete</span></button>'
     + '<span class="pcard__spacer"></span>'
     + '<button class="btn btn-primary btn-sm" data-action="add">' + icon('plus') + '<span>New bot</span></button>'
     + '</div>'
@@ -891,7 +896,7 @@ function scoresHtml() {
 function pxLatencyClass(ms) { return ms <= 700 ? 'is-good' : ms <= 1500 ? 'is-ok' : 'is-slow'; }
 function pxSig(p) {
   if (!p) return 'none';
-  return [p.enabled, p.total, p.assigned, p.refreshing, p.maxPerIp, p.proxies.map((x) => x.key + ':' + x.bots.length).join(',')].join('|');
+  return [p.enabled, p.total, p.assigned, p.uniqueIps, p.collisions, p.refreshing, p.maxPerIp, p.proxies.map((x) => x.key + ':' + x.bots.length).join(',')].join('|');
 }
 function pxStat(label, value, hint, cls) {
   return '<div class="pxstat' + (cls ? ' ' + cls : '') + '"><span>' + esc(label) + '</span><b>' + esc(value) + '</b><em>' + esc(hint) + '</em></div>';
@@ -915,6 +920,10 @@ function proxyBodyHtml(p) {
   const spare = p.proxies.filter((x) => !x.bots.length);
   const routed = inUse.reduce((a, x) => a + x.bots.length, 0);
   const avg = inUse.length ? Math.round(inUse.reduce((a, x) => a + x.latency, 0) / inUse.length) : 0;
+  const guard = (p.collisions || 0) > 0
+    ? '<div class="pxwarn">' + icon('alert') + '<span><b>Route collision detected.</b> ' + p.collisions + ' bot' + (p.collisions === 1 ? '' : 's') + ' share an address — reshuffle to give each one its own IP.</span>'
+      + '<button class="btn btn-ghost btn-sm" data-action="proxy-reshuffle">Reshuffle</button></div>'
+    : '';
   const stats = '<div class="pxstats">'
     + pxStat('Pool', String(p.total), p.total ? 'live SOCKS5 routes' : 'none yet', 'is-brand')
     + pxStat('In use', String(inUse.length), 'egress addresses', 'is-gold')
@@ -945,12 +954,12 @@ function proxyBodyHtml(p) {
       + (spare.length > 60 ? '<div class="pxpool__more">+' + (spare.length - 60) + ' more validated routes</div>' : '')
       + '</section>'
     : '';
-  return stats + controls + active + list;
+  return guard + stats + controls + active + list;
 }
 function proxiesHtml() {
   const p = state.proxy;
   return '<div class="page-head"><div><span class="eyebrow"><i></i> Egress</span><h2>Proxies</h2>'
-    + '<p>Bots are pinned to a SOCKS5 address — five per IP — and fall back to a direct connection if a route dies.</p></div>'
+    + '<p>Each bot gets its own SOCKS5 address — one bot per IP — with a different route on every reconnect. Direct is only a last resort.</p></div>'
     + '<div class="page-head__actions">'
     + '<button class="btn btn-ghost" data-action="proxy-refresh">' + icon('restart') + '<span>Refresh pool</span></button>'
     + '<button class="btn btn-primary" data-action="proxy-apply">' + icon('zap') + '<span>Apply to fleet</span></button>'
@@ -1253,6 +1262,8 @@ function handleAction(action, el) {
     if (action === 'bot-page' && id) { state.botId = id; switchView('bot'); return Promise.resolve(); }
     if (action === 'add') { openAddBot(); return Promise.resolve(); }
     if (action === 'setup') { openFleetSetup(); return Promise.resolve(); }
+    if (action === 'delete-bot' && id) { const bot = findBot(id); openConfirm('Delete bot', 'Remove ' + (bot ? bot.name : 'this bot') + ' from the panel? Its config and saved state will be erased.', 'Delete bot', () => api('/api/bots/' + id, { method: 'DELETE' }).then(() => afterRemoval('Bot deleted.'))); return Promise.resolve(); }
+    if (action === 'clear-all') { openConfirm('Remove all bots', 'Delete all ' + state.bots.length + ' bots from the panel? This cannot be undone.', 'Remove all', () => api('/api/bots/clear', { method: 'POST', body: {} }).then((d) => afterRemoval((d.removed || 0) + ' bots removed.'))); return Promise.resolve(); }
     if (action === 'master') { toggleMaster(); return Promise.resolve(); }
     if (action === 'proxy-refresh') return proxyPost({ refresh: true }, 'Refreshing pool', 'Testing SOCKS5 routes — this takes about a minute.');
     if (action === 'proxy-reshuffle') return proxyPost({ reshuffle: true }, 'Assignments cleared', 'Bots pick a new IP on their next reconnect.');
@@ -1285,6 +1296,31 @@ async function submitBotCommand(form) {
 }
 
 /* ── add bot modal ── */
+function openConfirm(title, body, label, onSubmit) {
+  const root = $('#modal-root'); if (!root) return;
+  state._confirmSubmit = onSubmit;
+  root.hidden = false;
+  root.innerHTML = '<div class="modal-backdrop" data-close="1"></div>'
+    + '<div class="modal-card modal-card--sm" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">'
+    + '<div class="modal-head"><h2 id="confirm-title">' + esc(title) + '</h2><button class="icon-btn" type="button" data-close="1" aria-label="Close">' + icon('x') + '</button></div>'
+    + '<form id="confirm-form" class="modal-body">'
+    + '<p class="confirm__body">' + icon('alert') + '<span>' + esc(body) + '</span></p>'
+    + '<div class="modal-actions"><button type="button" class="btn btn-ghost" data-close="1">Cancel</button><button class="btn btn-danger" type="submit">' + esc(label) + '</button></div>'
+    + '</form></div>';
+}
+
+async function afterRemoval(msg) {
+  const d = await api('/api/state');
+  state.bots = Array.isArray(d.bots) ? d.bots : [];
+  state.stats = d.stats || {};
+  if (state.view === 'bot' && state.botId && !findBot(state.botId)) {
+    state.botId = null;
+    location.hash = '#/dashboard';
+    applyRoute();
+  } else renderAll();
+  toast('ok', 'Removed', msg);
+}
+
 function openFleetSetup() {
   const root = $('#modal-root'); if (!root) return;
   root.hidden = false;
@@ -1482,6 +1518,7 @@ function init() {
     if (e.target.id === 'bot-command-form') { e.preventDefault(); submitBotCommand(e.target); }
     else if (e.target.id === 'add-bot-form') { e.preventDefault(); submitAddBot(e.target); }
     else if (e.target.id === 'fleet-form') { e.preventDefault(); submitFleetSetup(e.target); }
+    else if (e.target.id === 'confirm-form') { e.preventDefault(); const fn = state._confirmSubmit; state._confirmSubmit = null; closeModal(); if (fn) fn().catch((err) => toast('err', 'Remove failed', err.message)); }
   });
 
   document.addEventListener('error', (e) => {

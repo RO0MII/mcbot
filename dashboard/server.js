@@ -315,6 +315,9 @@ class ManagedBot {
     this._rateLimitedUntil = 0;
     this._bannedUntil = 0;
     this._banText = '';
+    this._sawKick = false;
+    this._lastKick = '';
+    this._proxyTries = 0;
     this._diagDone = false;
     this._gateTimer = null;
     this.loggedIn = false;
@@ -451,6 +454,7 @@ class ManagedBot {
       proxySince: this.proxySince,
       banned: !!this._banText,
       banText: this._banText,
+      lastKick: this._lastKick || null,
       loggedIn: this.loggedIn,
       loginAttempts: this.loginAttempts,
       switched: this.switched,
@@ -563,6 +567,7 @@ class ManagedBot {
     if (this.wanted && this.bot) return;
     this.wanted = true;
     this._loginGaveUp = false;
+    this._proxyTries = 0;
     this.addLog('info', 'Starting bot…');
     this._connect();
   }
@@ -570,6 +575,7 @@ class ManagedBot {
   stop(reason = 'Stopped by user') {
     if (this._gateTimer) { clearTimeout(this._gateTimer); this._gateTimer = null; }
     this._retries = 0;
+    this._proxyTries = 0;
     this._rateLimitedUntil = 0;
     this.wanted = false;
     this._clearTimers();
@@ -619,6 +625,12 @@ class ManagedBot {
       }
     }
     const gen = (this._gen = (this._gen || 0) + 1);
+    // A route verified against a different game server is not necessarily
+    // any use here — retarget the pool when a bot uses another endpoint.
+    if (this.host && proxyPool.target && proxyPool.target.host !== this.host) {
+      this.addLog('info', `Verifying proxy routes against ${this.host}…`);
+      proxyPool.setTarget(this.host, this.port);
+    }
     const px = this._directNext ? null : proxyPool.pick(this.id, this.name);
     this._directNext = false;
     if (!px) return this._connectNow(null);
@@ -632,7 +644,17 @@ class ManagedBot {
     }).catch((err) => {
       if (!this.wanted || gen !== this._gen) return;
       proxyPool.reportFailure(px);
-      this.addLog('warn', `Proxy ${px.ip}:${px.port} unreachable (${clean(err && err.message || err, 80)}) — connecting direct.`);
+      // Drop the dead pin so the next attempt cannot reuse the same address.
+      proxyPool.release(this.id);
+      const why = clean(err && err.message || err, 80);
+      this._proxyTries++;
+      if (this._proxyTries < 3 && proxyPool.summary().total) {
+        this.addLog('warn', `Proxy ${px.ip}:${px.port} unreachable (${why}) — trying another route.`);
+        this._later(() => this._connect(), 600);
+        return;
+      }
+      this._proxyTries = 0;
+      this.addLog('warn', `Proxy ${px.ip}:${px.port} unreachable (${why}) — connecting direct as a last resort.`);
       this._directNext = true;
       this._connectNow(null);
     });
@@ -643,6 +665,8 @@ class ManagedBot {
     this._clearTimers();
     this._stopAfk();
     this._guardKicked = false;
+    this._sawKick = false;
+    this._lastKick = '';
     this._loginPromptSeen = false;
     this._loginCooldown = 0;
     this._loginGaveUp = false;
@@ -719,6 +743,7 @@ class ManagedBot {
       if (this._watchdog) { clearTimeout(this._watchdog); this._watchdog = null; }
       this.nextRetryAt = null;
       this._retries = 0;
+      this._proxyTries = 0;
       this._throttleHits = 0;
       this._rateLimitedUntil = 0;
       this._bannedUntil = 0;
@@ -758,8 +783,8 @@ class ManagedBot {
     });
 
     bot.on('kicked', (reason) => {
-      const text = chatText(reason) || stripColor(String(reason || ''));
-      this.addLog('err', `Kicked by server: ${text.slice(0, 160)}`);
+      this._sawKick = true;
+      this._lastKick = chatText(reason) || stripColor(String(reason || ''));
     });
 
     bot.on('messagestr', (message) => this._onMessage(message));
@@ -795,7 +820,6 @@ class ManagedBot {
         this._banText = stripColor(r).replace(/\s+/g, ' ').trim().slice(0, 400);
         this._bannedUntil = now() + 30 * 60 * 1000;
         blockConnectGate(120000);
-        this.addLog('err', `BANNED: ${this._banText.slice(0, 200)}`);
       }
       if (/slow down|connecting too quickly|too many connections|rate.?limit|throttl|too fast|try again later|too many login/i.test(r)) {
         this._throttleHits = (this._throttleHits || 0) + 1;
@@ -804,14 +828,18 @@ class ManagedBot {
         this._rateLimitedUntil = now() + wait;
         // Keep the entire fleet quiet too — every extra attempt extends the block.
         blockConnectGate(wait);
-        this.addLog('warn', `Login throttled by the server — backing the fleet off for ${Math.round(wait / 60000)} min.`);
       }
-      this.setStatus('reconnecting', 'Kicked — reconnecting');
+      const short = r.length > 220 ? r.slice(0, 217) + '…' : r;
+      let label = 'Kicked — reconnecting';
+      if (/verification failed|verify/i.test(r)) label = 'Server verification failed';
+      else if (/blocked from entering/i.test(r)) label = 'Temporarily blocked by server';
+      else if (/banned/i.test(r)) label = 'Banned by server';
+      else if (/slow down|too quickly|throttl/i.test(r)) label = 'Server rate-limited joins';
+      this.setStatus('reconnecting', label);
+      this.lastError = short || this.lastError;
+      this.addLog('err', `Server rejected the login: ${short || 'no reason given'}`);
       if (/guard|bot verification|failed.*verif/i.test(r)) {
         this._guardKicked = true;
-        this.addLog('warn', `GUARD kick: ${r} — waiting 30s.`);
-      } else {
-        this.addLog('warn', `Kicked: ${r || 'no reason given'}`);
       }
     });
 
@@ -849,13 +877,14 @@ class ManagedBot {
       this.addLog('warn', 'Disconnected.');
       this.setStatus('reconnecting', 'Disconnected');
       this._retries = (this._retries || 0) + 1;
-      // A SOCKS route can close before the kick packet arrives, hiding the real
-      // reason. Every third attempt goes direct so we can read it.
-      if (!this._diagDone && this._retries >= 3 && this.proxy) {
+      // A SOCKS route can close before the kick packet arrives, hiding the
+      // real reason. Retry once direct so the panel shows what the server said.
+      if (!this._diagDone && this.proxy && !this._sawKick) {
         this._diagDone = true;
         this._directNext = true;
-        this.addLog('info', 'Diagnosing the connection directly to read the server reason…');
+        this.addLog('info', 'Proxy closed before the server replied — retrying once direct to read the reason…');
       }
+      this._sawKick = false;
       let delay;
       if (this._bannedUntil && now() < this._bannedUntil) {
         delay = (this._bannedUntil - now()) + Math.floor(Math.random() * 120000);
@@ -2042,6 +2071,7 @@ async function handleApi(req, res, url) {
     if (parts.length === 3 && method === 'DELETE') {
       bot.desiredOn = false;
       bot.stop('Removed from dashboard');
+      proxyPool.release(bot.id);
       manager.bots.delete(bot.id);
       manager.groups.forEach((g) => { g.botIds = g.botIds.filter((id) => id !== bot.id); });
       saveConfigs();
@@ -2201,6 +2231,7 @@ function boot() {
       host: process.env.PROXY_TARGET_HOST || (firstBot && firstBot.host) || 'mc.hungrybirds.org',
       port: parseInt(process.env.PROXY_TARGET_PORT || String((firstBot && firstBot.port) || 25565), 10),
     },
+    botIds: () => Array.from(manager.bots.keys()),
     log,
   });
 
