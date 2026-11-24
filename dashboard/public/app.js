@@ -110,11 +110,6 @@ function vitalsSig(bot) {
   const p = bot.position;
   return [bot.status, bot.health, bot.food, bot.autoEat, p ? p.x + ',' + p.y + ',' + p.z : ''].join('|');
 }
-function gearSig(bot) {
-  const enc = (it) => (it ? it.name + 'x' + it.count : '-');
-  const armor = Array.isArray(bot.armor) ? bot.armor : [null, null, null, null];
-  return [enc(bot.heldItem)].concat(armor.map(enc), [enc(bot.offhand), bot.version || '']).join('|');
-}
 function boardSig() {
   return (state.bots || []).map((b) => {
     const t = botTopScore(b);
@@ -136,6 +131,53 @@ function setSigHtml(el, sig, html) {
   el.innerHTML = html;
 }
 
+/* ── local cache: instant paint on reload, no extra requests ── */
+const SNAP_KEY = 'mcbot.snap.v2';
+const LASTBOT_KEY = 'mcbot.lastbot.v2';
+function fleetSig(list) {
+  return (list || []).map((b) => [b.id, b.status, b.players, b.health, b.food, b.loggedIn ? 1 : 0, b.joinedAt || 0, (b.lastLog && b.lastLog.t) || 0, b.autoEat ? 1 : 0].join(':')).join('|');
+}
+function saveSnapshot() {
+  try { localStorage.setItem(SNAP_KEY, JSON.stringify({ bots: state.bots, stats: state.stats, at: Date.now() })); } catch (e) {}
+}
+function scheduleSnapshot() {
+  if (state._snapTimer) return;
+  state._snapTimer = setTimeout(() => { state._snapTimer = null; saveSnapshot(); }, 1500);
+}
+function loadSnapshot() {
+  try {
+    const d = JSON.parse(localStorage.getItem(SNAP_KEY) || 'null');
+    if (d && Array.isArray(d.bots) && d.bots.length && Date.now() - (d.at || 0) < 15 * 60 * 1000) return d;
+  } catch (e) {}
+  return null;
+}
+function saveLastBot(id, patch) {
+  try {
+    let cur = {};
+    try { cur = JSON.parse(localStorage.getItem(LASTBOT_KEY) || '{}') || {}; } catch (e) { cur = {}; }
+    if (cur.id !== id) cur = { id: id };
+    Object.assign(cur, patch, { id: id, at: Date.now() });
+    localStorage.setItem(LASTBOT_KEY, JSON.stringify(cur));
+  } catch (e) {}
+}
+function hydrateLastBot() {
+  if (!state.botId) return;
+  try {
+    const d = JSON.parse(localStorage.getItem(LASTBOT_KEY) || 'null');
+    if (!d || d.id !== state.botId) return;
+    if (Array.isArray(d.logs) && d.logs.length && !state.logs.has(d.id)) state.logs.set(d.id, d.logs);
+    if (d.inv && !state.invs.has(d.id)) state.invs.set(d.id, d.inv);
+  } catch (e) {}
+}
+function prefetchBot(id) {
+  if (!id) return;
+  const now = Date.now();
+  if (now - (state._prefetch[id] || 0) < 15000) return;
+  state._prefetch[id] = now;
+  if (!state.logs.has(id)) loadBotLogs(id);
+  if (!state.invs.has(id)) loadBotInventory(id);
+}
+
 /* ── state ── */
 const state = {
   authed: false,
@@ -151,9 +193,15 @@ const state = {
   live: 'connecting',
   sse: null,
   lastEventAt: 0,
+  lastSyncAt: 0,
   tick: null,
   sseWatch: null,
   _spy: null,
+  _tabLock: 0,
+  _tabTarget: null,
+  _snapTimer: null,
+  _prefetch: {},
+  _inflight: { logs: {}, inv: {} },
 };
 
 /* ── api ── */
@@ -178,16 +226,27 @@ async function enterApp() {
   $('#mobilenav').classList.remove('hidden');
   document.body.classList.remove('is-locked');
   document.title = 'Dashboard · MCBot Control';
-  renderAll();
+
+  // Paint immediately from the last known fleet, then reconcile with the server.
+  const snap = loadSnapshot();
+  if (snap) { state.bots = snap.bots; state.stats = snap.stats || {}; state.loading = false; }
+  applyRoute();
+  renderSidebar();
+  patchAggregates();
+
   try {
     const data = await api('/api/state');
-    state.bots = Array.isArray(data.bots) ? data.bots : [];
+    const next = Array.isArray(data.bots) ? data.bots : [];
+    const changed = fleetSig(state.bots) !== fleetSig(next);
+    state.bots = next;
     state.stats = data.stats || {};
     state.loading = false;
-    renderAll();
+    state.lastSyncAt = Date.now();
+    if (changed) applyRoute();
+    else { renderSidebar(); patchAggregates(); }
+    scheduleSnapshot();
     connectSSE();
     startTick();
-    applyRoute();
   } catch (e) { state.loading = false; renderAll(); }
 }
 function showLogin() {
@@ -212,13 +271,17 @@ function connectSSE() {
   const es = new EventSource('/api/events');
   state.sse = es;
   const wrap = (name, fn) => { es.addEventListener(name, (e) => { bumpSse(); try { fn(JSON.parse(e.data)); } catch (err) {} }); };
-  es.onopen = () => { bumpSse(); resync(); };
+  es.onopen = () => { bumpSse(); };
   wrap('bot', (d) => onBot(d.bot));
   wrap('stats', (d) => onStats(d));
   wrap('log', (d) => onLog(d));
-  wrap('removed', (d) => { if (d && d.id) { state.bots = state.bots.filter((b) => b.id !== d.id); renderAll(); } });
+  wrap('removed', (d) => { if (d && d.id) { state.bots = state.bots.filter((b) => b.id !== d.id); renderAll(); scheduleSnapshot(); } });
   es.addEventListener('ping', () => bumpSse());
-  es.addEventListener('hello', () => { bumpSse(); resync(); });
+  es.addEventListener('hello', () => {
+    bumpSse();
+    // Only pull the full fleet when we actually lost the stream (or have nothing yet).
+    if (!state.bots.length || Date.now() - state.lastSyncAt > 15000) resync();
+  });
   es.onerror = () => { setLive('offline'); if (!state.authed) return; scheduleReconnect(1500); };
   startSseWatchdog();
 }
@@ -242,13 +305,25 @@ function setLive(mode) {
   });
 }
 function scheduleReconnect(delay) { setLive('offline'); setTimeout(() => { if (!state.authed) return; connectSSE(); }, delay || 1500); }
-function resync() { api('/api/state').then((d) => { state.bots = Array.isArray(d.bots) ? d.bots : []; state.stats = d.stats || {}; renderAll(); }).catch(() => {}); }
+function resync() {
+  api('/api/state').then((d) => {
+    const next = Array.isArray(d.bots) ? d.bots : [];
+    const changed = fleetSig(state.bots) !== fleetSig(next);
+    state.bots = next;
+    state.stats = d.stats || {};
+    state.lastSyncAt = Date.now();
+    if (changed) renderAll();
+    else { renderSidebar(); patchAggregates(); }
+    scheduleSnapshot();
+  }).catch(() => {});
+}
 
 /* ── live events ── */
 function onBot(bot) {
   if (!bot) return;
   const i = state.bots.findIndex((b) => b.id === bot.id);
   if (i >= 0) state.bots[i] = bot; else state.bots.push(bot);
+  scheduleSnapshot();
   renderSidebar();
   patchAggregates();
   if (state.view === 'bot' && state.botId === bot.id) patchBotPage(bot);
@@ -267,7 +342,7 @@ function onLog(d) {
   if (arr.length > 400) state.logs.set(d.id, arr.slice(-400));
   if (state.view === 'bot' && state.botId === d.id) renderBotConsole();
 }
-function onStats(d) { if (d && d.stats) state.stats = d.stats; renderSidebar(); patchAggregates(); }
+function onStats(d) { if (d && d.stats) { state.stats = d.stats; scheduleSnapshot(); } renderSidebar(); patchAggregates(); }
 
 /* ── chrome ── */
 function updateChrome() {
@@ -413,7 +488,7 @@ function heroHtml() {
 function statsHtml() {
   const s = getStats();
   const cards = [
-    { icon: 'zap', value: s.online, agg: 'online', label: 'Bots online', hint: '<span data-agg="connect-hint">' + (s.connecting ? s.connecting + ' connecting' : 'all systems go') + '</span>', cls: 'stat--pink' },
+    { icon: 'zap', value: s.online, agg: 'online', label: 'Bots online', hint: '<span data-agg="connect-hint">' + (s.connecting ? s.connecting + ' connecting' : 'all systems go') + '</span>', cls: 'stat--gold' },
     { icon: 'cube', value: s.total, agg: 'total', label: 'Total bots', hint: 'unlimited fleet', cls: 'stat--white' },
     { icon: 'server', value: s.servers, agg: 'servers', label: 'Servers', hint: 'unique endpoints', cls: '' },
     { icon: 'users', value: s.players, agg: 'players', label: 'Players online', hint: 'seen by your bots', cls: '' },
@@ -426,6 +501,15 @@ function gridHtml() {
   const bots = filteredBots();
   if (bots.length) return '<div class="bot-grid">' + bots.map(botCard).join('') + '</div>';
   if (state.bots.length) return '<div class="no-results">No bots match this search or filter. Try another name, IP or status.</div>';
+  if (state.loading) {
+    const sk = '<article class="bot-card is-skeleton" aria-hidden="true">'
+      + '<div class="sk-top"><span class="sk sk-av"></span><div class="sk-lines"><span class="sk sk-line" style="width:44%"></span><span class="sk sk-line" style="width:66%"></span></div></div>'
+      + '<div class="sk-row">' + '<span class="sk sk-block"></span>'.repeat(4) + '</div>'
+      + '<span class="sk sk-line" style="width:82%"></span>'
+      + '<span class="sk sk-line" style="width:100%;height:34px;border-radius:11px"></span>'
+      + '</article>';
+    return '<div class="bot-grid">' + sk.repeat(4) + '</div>';
+  }
   return '<div class="empty"><div class="empty__art">' + icon('cube') + '</div><h3>No bots yet</h3><p>Add your first Minecraft bot — name, server IP and password. Auto-login, reconnect and server switching are handled for you.</p><button class="btn btn-primary" data-action="add">' + icon('plus') + '<span>Add your first bot</span></button></div>';
 }
 function dashboardHtml() {
@@ -485,7 +569,8 @@ function invStripHtml(bot) {
       const extra = it.count > 1 ? '<i class="mini-more">x' + it.count + '</i>' : '';
       return '<span class="mini-slot">' + itemImgHtml(it, bot.version, 'mini-img') + extra + '</span>';
     }).join('');
-    return '<span class="bot-inv"><span class="bot-inv__slots">' + slots + '</span><span class="bot-inv__label">' + icon('layers') + '<b>' + used + '</b><span>/36</span></span></span>';
+    const more = items.length > 6 ? '<span class="mini-extra">+' + (items.length - 6) + '</span>' : '';
+    return '<span class="bot-inv" data-action="bot-page" data-id="' + esc(bot.id) + '" title="Open ' + esc(bot.name) + '\u2019s inventory"><span class="bot-inv__slots">' + slots + more + '</span><span class="bot-inv__label">' + icon('layers') + '<b>' + used + '</b><span>/36</span></span></span>';
   }
   return '<span class="bot-inv is-off"><span class="bot-inv__empty">' + icon('layers') + '<span>' + (bot.status === 'online' ? 'Inventory empty' : 'Inventory offline') + '</span></span></span>';
 }
@@ -567,15 +652,6 @@ function scoreboardHtml(bot) {
   }).join('');
   return '<div class="sb"><div class="sb__title">' + esc(sb.title || 'Scoreboard') + '</div><div class="sb__rows">' + rows + '</div><div class="sb__foot"><span>' + items.length + ' entries</span><b>live</b></div></div>';
 }
-function gearHtml(bot) {
-  const version = bot.version || '1.20.1';
-  const armor = Array.isArray(bot.armor) ? bot.armor : [null, null, null, null];
-  const labels = ['Helmet', 'Chestplate', 'Leggings', 'Boots'];
-  let gear = '<div class="player-gear"><div class="player-gear__slot"><span>Held</span><div class="slot">' + itemImgHtml(bot.heldItem || null, version) + '</div></div>';
-  for (let i = 0; i < 4; i++) gear += '<div class="player-gear__slot"><span>' + labels[i] + '</span><div class="slot">' + itemImgHtml(armor[i], version) + '</div></div>';
-  gear += '<div class="player-gear__slot"><span>Off-hand</span><div class="slot">' + itemImgHtml(bot.offhand || null, version) + '</div></div></div>';
-  return gear;
-}
 function botPageHtml() {
   const bot = findBot(state.botId) || (state.bots || [])[0];
   if (!bot) return '<div class="empty"><div class="empty__art">' + icon('cube') + '</div><h3>No bot selected</h3><p>Go back to the dashboard and pick a bot.</p><button class="btn btn-primary" data-view="dashboard">' + icon('grid') + '<span>Back to overview</span></button></div>';
@@ -584,7 +660,6 @@ function botPageHtml() {
   const xp = (d && d.xp) || { level: 0, points: 0 };
   const hp = Number.isFinite(bot.health) ? Math.max(0, Math.min(20, bot.health)) : 0;
   const food = Number.isFinite(bot.food) ? Math.max(0, Math.min(20, bot.food)) : 0;
-  const pos = bot.position ? bot.position.x + ' ' + bot.position.y + ' ' + bot.position.z : '—';
   const metrics = [
     { key: 'health', icon: 'heart', label: 'Health', value: hp + '/20', bad: hp <= 6 },
     { key: 'food', icon: 'food', label: 'Food', value: food + '/20', warn: food <= 6 },
@@ -596,17 +671,6 @@ function botPageHtml() {
   const metricsHtml = metrics.map((m) =>
     '<div class="bp-metric' + (m.bad ? ' is-bad' : (m.warn ? ' is-warn' : '')) + '" data-f="metric-' + m.key + '"><span>' + icon(m.icon) + ' ' + m.label + '</span><b data-f="m-' + m.key + '"' + (m.key === 'uptime' ? ' data-uptime="' + m.uptime + '"' : '') + '>' + m.value + '</b><em>' + m.label + '</em></div>'
   ).join('');
-  const kv = [
-    { key: 'pos', label: 'Position', value: pos },
-    { key: 'dim', label: 'Dimension', value: d.dimension || '—' },
-    { key: 'difficulty', label: 'Difficulty', value: d.difficulty || '—' },
-    { key: 'brand', label: 'Server brand', value: d.serverBrand || '—' },
-    { key: 'gamemode', label: 'Gamemode', value: d.gamemode || '—' },
-    { key: 'uuid', label: 'UUID', value: d.uuid ? String(d.uuid).slice(0, 8) + '…' : '—' },
-    { key: 'effects', label: 'Effects', value: d.effects && d.effects.length ? d.effects.map((e) => e.name || e.type).join(', ') : 'None' },
-    { key: 'xplevel', label: 'XP level', value: String(xp.level || 0) },
-  ];
-  const kvHtml = kv.map((k) => '<div><span>' + esc(k.label) + '</span><b data-f="kv-' + k.key + '">' + esc(k.value) + '</b></div>').join('');
   return '<div class="bp-progress" aria-hidden="true"><i></i></div>'
     + '<section class="bot-hero">'
     + '<div class="bot-hero__avatar"><span class="avatar-initial">' + esc(initial(bot.name)) + '</span><img src="/api/skin/' + encodeURIComponent(bot.name) + '?kind=body&size=200" alt="" loading="lazy" decoding="async" /><span class="status-dot ' + st.dot + '" data-f="hero-dot"></span></div>'
@@ -625,7 +689,6 @@ function botPageHtml() {
     + '<div class="bp-tabs" role="tablist">'
     + '<button class="is-active" data-bp-scroll="bp-console">' + icon('terminal') + '<span>Console</span></button>'
     + '<button data-bp-scroll="bp-inventory">' + icon('layers') + '<span>Inventory</span></button>'
-    + '<button data-bp-scroll="bp-player">' + icon('user') + '<span>Player</span></button>'
     + '<button data-bp-scroll="bp-score">' + icon('trophy') + '<span>Scoreboard</span></button>'
     + '</div>'
     + '<div class="sheet">'
@@ -639,12 +702,8 @@ function botPageHtml() {
     + '<section class="bpsec" id="bp-inventory">'
     + '<div class="bpsec__head"><span class="bpsec__num">02</span><h3>Inventory</h3><span class="bpsec__rule"></span><span class="bpsec__sub">All 36 slots — crafting, result, armour, off-hand, storage and hotbar.</span></div>'
     + '<div id="bp-inv-root"></div></section>'
-    + '<section class="bpsec" id="bp-player">'
-    + '<div class="bpsec__head"><span class="bpsec__num">03</span><h3>Player</h3><span class="bpsec__rule"></span><span class="bpsec__sub">Vitals, world state and gear of this bot.</span></div>'
-    + '<div class="bp-kv">' + kvHtml + '</div>'
-    + '<div data-f="gear" data-sig="' + esc(gearSig(bot)) + '">' + gearHtml(bot) + '</div></section>'
     + '<section class="bpsec" id="bp-score">'
-    + '<div class="bpsec__head"><span class="bpsec__num">04</span><h3>Scoreboard</h3><span class="bpsec__rule"></span><span class="bpsec__sub">The server sidebar exactly as ' + esc(bot.name) + ' sees it.</span></div>'
+    + '<div class="bpsec__head"><span class="bpsec__num">03</span><h3>Scoreboard</h3><span class="bpsec__rule"></span><span class="bpsec__sub">The server sidebar exactly as ' + esc(bot.name) + ' sees it.</span></div>'
     + '<div data-f="scoreboard" data-sig="' + esc(scoreSig(bot)) + '">' + scoreboardHtml(bot) + '</div></section>'
     + '</div>';
 }
@@ -673,14 +732,6 @@ function patchBotPage(bot) {
   const mh = root.querySelector('[data-f="metric-health"]'); if (mh) mh.classList.toggle('is-bad', hp <= 6);
   const mf = root.querySelector('[data-f="metric-food"]'); if (mf) mf.classList.toggle('is-warn', food <= 6);
   const up = root.querySelector('[data-f="m-uptime"]'); if (up) up.setAttribute('data-uptime', bot.joinedAt || '');
-  setText('[data-f="kv-pos"]', bot.position ? bot.position.x + ' ' + bot.position.y + ' ' + bot.position.z : '—');
-  setText('[data-f="kv-dim"]', d.dimension || '—');
-  setText('[data-f="kv-difficulty"]', d.difficulty || '—');
-  setText('[data-f="kv-brand"]', d.serverBrand || '—');
-  setText('[data-f="kv-gamemode"]', d.gamemode || '—');
-  setText('[data-f="kv-effects"]', d.effects && d.effects.length ? d.effects.map((e) => e.name || e.type).join(', ') : 'None');
-  setText('[data-f="kv-xplevel"]', String(xp.level || 0));
-  setSigHtml(root.querySelector('[data-f="gear"]'), gearSig(bot), gearHtml(bot));
   setSigHtml(root.querySelector('[data-f="scoreboard"]'), scoreSig(bot), scoreboardHtml(bot));
 }
 
@@ -751,6 +802,7 @@ function switchView(view, push) {
   if (!['dashboard', 'servers', 'scores', 'bot'].includes(view)) return;
   if (state.view === view && view !== 'bot') return;
   state.view = view;
+  if (view === 'bot') hydrateLastBot();
   updateChrome();
   renderView();
   renderSidebar();
@@ -765,11 +817,14 @@ function applyRoute() {
   else if (parts[0] === 'servers') { state.view = 'servers'; state.botId = null; }
   else if (parts[0] === 'scores') { state.view = 'scores'; state.botId = null; }
   else { state.view = 'dashboard'; state.botId = null; }
-  state.loading = false;
+  if (state.bots.length) state.loading = false;
+  if (state.view === 'bot') hydrateLastBot();
   updateChrome();
   renderView();
   renderSidebar();
   patchAggregates();
+  // A deep link or reload straight into a bot page still needs its data.
+  if (state.view === 'bot' && state.botId) { loadBotLogs(state.botId); loadBotInventory(state.botId); }
 }
 
 /* ── interaction ── */
@@ -777,6 +832,9 @@ function bindCards() {
   $$('.bot-card').forEach((card) => {
     if (card.getAttribute('data-tilt')) return;
     card.setAttribute('data-tilt', '1');
+    const id = card.getAttribute('data-bot');
+    // Warm logs + inventory the moment a mouse user aims at a card.
+    card.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') prefetchBot(id); });
     if (reducedMotion()) return;
     let raf = 0, last = null;
     card.addEventListener('pointermove', (e) => {
@@ -862,18 +920,31 @@ function renderBotConsole() {
   if (nearBottom) box.scrollTop = box.scrollHeight;
 }
 async function loadBotLogs(id) {
+  if (!id || state._inflight.logs[id]) return;
+  state._inflight.logs[id] = 1;
   try {
     const d = await api('/api/bots/' + id + '/logs');
-    state.logs.set(id, Array.isArray(d.logs) ? d.logs : []);
+    const logs = Array.isArray(d.logs) ? d.logs : [];
+    state.logs.set(id, logs);
+    saveLastBot(id, { logs: logs.slice(-60) });
     if (state.view === 'bot' && state.botId === id) renderBotConsole();
-  } catch (e) {}
+  } catch (e) {} finally { delete state._inflight.logs[id]; }
 }
 
 /* ── inventory ── */
 function renderBotInventory() {
   const root = $('#bp-inv-root'); if (!root) return;
   const inv = state.invs.get(state.botId) || null;
-  if (!inv) { root.innerHTML = '<div class="console-empty">' + icon('layers') + '<span>Reading inventory…</span></div>'; return; }
+  if (!inv) {
+    const cell = '<span class="sk sk-cell"></span>';
+    root.innerHTML = '<div class="inv"><div class="inv__side">'
+      + '<div class="inv-block"><div class="inv-block__label">Crafting</div><div class="inv-craft"><div class="inv-craft__grid">' + cell.repeat(4) + '</div><div class="inv-craft__result">' + cell + '</div></div></div>'
+      + '<div class="inv-block"><div class="inv-block__label">Armour</div><div class="inv-armor">' + cell.repeat(4) + '</div></div>'
+      + '<div class="inv-block"><div class="inv-block__label">Off-hand</div><div class="inv-block__off">' + cell + '</div></div>'
+      + '</div><div class="inv__main"><div class="inv-block__label">Hotbar</div><div class="inv-grid inv-grid--hotbar">' + cell.repeat(9) + '</div>'
+      + '<div class="inv-block__label">Storage</div><div class="inv-grid inv-grid--storage">' + cell.repeat(27) + '</div></div></div>';
+    return;
+  }
   const version = (findBot(state.botId) || {}).version || '1.20.1';
   const slotHtml = (it, selected) => {
     let cls = 'slot'; if (!it) cls += ' is-empty'; if (selected) cls += ' is-selected';
@@ -893,11 +964,13 @@ function renderBotInventory() {
     + '</div></div>';
 }
 async function loadBotInventory(id) {
+  if (!id || state._inflight.inv[id]) return;
+  state._inflight.inv[id] = 1;
   try {
     const d = await api('/api/bots/' + id + '/inventory');
-    if (d && d.inventory) state.invs.set(id, d.inventory);
+    if (d && d.inventory) { state.invs.set(id, d.inventory); saveLastBot(id, { inv: d.inventory }); }
     if (state.view === 'bot' && state.botId === id) renderBotInventory();
-  } catch (e) {}
+  } catch (e) {} finally { delete state._inflight.inv[id]; }
 }
 
 /* ── actions ── */
@@ -1089,6 +1162,7 @@ function init() {
   });
 
   window.addEventListener('popstate', () => applyRoute());
+  window.addEventListener('hashchange', () => applyRoute());
   window.addEventListener('scroll', () => {
     const bar = document.querySelector('#view .bp-progress i'); if (!bar) return;
     const max = Math.max(document.documentElement.scrollHeight - window.innerHeight, 0);
