@@ -643,8 +643,11 @@ class ManagedBot {
     this._directNext = false;
     if (!px) return this._connectNow(null);
 
-    this.setStatus('connecting', `Opening proxy ${px.ip}…`);
-    this.addLog('info', `Routing through ${px.ip}:${px.port} (${px.latency} ms)…`);
+    const routeLabel = px.virtual ? 'Webshare tunnel' : `${px.ip}:${px.port}`;
+    this.setStatus('connecting', px.virtual ? 'Opening Webshare tunnel…' : `Opening proxy ${px.ip}…`);
+    this.addLog('info', px.virtual
+      ? 'Routing through Webshare — fresh IP per bot…'
+      : `Routing through ${routeLabel} (${px.latency} ms)…`);
     proxyPool.open(px, this.host, this.port, 9000).then((socket) => {
       if (!this.wanted || gen !== this._gen) { try { socket.destroy(); } catch (_) {} return; }
       proxyPool.reportOk(px);
@@ -657,12 +660,12 @@ class ManagedBot {
       const why = clean(err && err.message || err, 80);
       this._proxyTries++;
       if (this._proxyTries < 3 && proxyPool.summary().total) {
-        this.addLog('warn', `Proxy ${px.ip}:${px.port} unreachable (${why}) — trying another route.`);
+        this.addLog('warn', `${routeLabel} unreachable (${why}) — trying another route.`);
         this._later(() => this._connect(), 600);
         return;
       }
       this._proxyTries = 0;
-      this.addLog('warn', `Proxy ${px.ip}:${px.port} unreachable (${why}) — connecting direct as a last resort.`);
+      this.addLog('warn', `${routeLabel} unreachable (${why}) — connecting direct as a last resort.`);
       this._directNext = true;
       this._connectNow(null);
     });
@@ -1823,6 +1826,7 @@ async function handleApi(req, res, url) {
     let body;
     try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
     if (body.enabled != null) proxyPool.setEnabled(!!body.enabled);
+    if (body.webshare != null) proxyPool.setWebshare(!!body.webshare);
     if (body.maxPerIp != null) proxyPool.setMaxPerIp(body.maxPerIp);
     if (body.reshuffle) proxyPool.reshuffle();
     if (body.refresh) proxyPool.refresh(true).catch(() => {});

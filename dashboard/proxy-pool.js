@@ -130,6 +130,44 @@ function socks5Connect(proxy, host, port, timeoutMs) {
   });
 }
 
+/* ── tiny HTTP CONNECT client (Webshare rotating endpoint) ──────────────── */
+
+function httpConnect(proxy, host, port, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const sock = net.connect({ host: proxy.host, port: proxy.port });
+    const finish = (err) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (err) { try { sock.destroy(); } catch (_) {} reject(err); }
+      else { sock.removeListener('data', onData); sock.removeListener('error', onError); sock.setTimeout(0); resolve(sock); }
+    };
+    const timer = setTimeout(() => finish(new Error('proxy timeout')), timeoutMs || 9000);
+    const onError = (e) => finish(e);
+    sock.once('error', onError);
+    sock.setTimeout(timeoutMs || 9000, () => finish(new Error('proxy timeout')));
+    let buf = Buffer.alloc(0);
+    const onData = (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      const cut = buf.indexOf('\r\n\r\n');
+      if (cut < 0) return;
+      const line = buf.slice(0, cut).toString('latin1').split('\r\n')[0] || '';
+      const code = Number((line.match(/\s(\d{3})\s/) || [])[1] || 0);
+      if (code !== 200) return finish(new Error('proxy CONNECT ' + (code || 'rejected')));
+      buf = buf.slice(cut + 4);
+      finish(null);
+    };
+    sock.on('connect', () => {
+      const auth = proxy.username
+        ? 'Proxy-Authorization: Basic ' + Buffer.from(proxy.username + ':' + (proxy.password || '')).toString('base64') + '\r\n'
+        : '';
+      sock.write('CONNECT ' + host + ':' + port + ' HTTP/1.1\r\nHost: ' + host + ':' + port + '\r\n' + auth + '\r\n');
+    });
+    sock.on('data', onData);
+  });
+}
+
 /* ── pool ────────────────────────────────────────────────────────────────── */
 
 class ProxyPool {
@@ -141,6 +179,9 @@ class ProxyPool {
     this.assignments = new Map(); // botId -> key
     this.names = new Map();       // botId -> bot name (display only)
     this._botIds = null;          // live bot ids, supplied by the server
+    this.webshare = {             // rotating HTTP CONNECT provider (local config)
+      enabled: false, host: 'p.webshare.io', port: 80, username: '', password: '',
+    };
     this.lastRefresh = 0;
     this.refreshing = false;
     this.lastError = '';
@@ -155,6 +196,7 @@ class ProxyPool {
     if (target && target.host) this.target = { host: target.host, port: target.port || 25565 };
     this.file = path.join(dataDir, 'proxies.json');
     this._load();
+    this._loadWebshare();
     this._pruneAssignments(); // drop pins belonging to bots that no longer exist
     this._schedule();
     // Re-validate the cached list (fast, a couple of seconds) so the first
@@ -190,6 +232,49 @@ class ProxyPool {
     this.opts.maxPerIp = clamp(Number(n) || 1, 1, 50);
     this._save();
     return this.opts.maxPerIp;
+  }
+
+  /* ── rotating provider (credentials live in gitignored data/webshare.json) ── */
+  _webshareFile() {
+    return this.file ? path.join(path.dirname(this.file), 'webshare.json') : null;
+  }
+
+  _loadWebshare() {
+    const file = this._webshareFile();
+    if (!file) return;
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!raw || typeof raw !== 'object') return;
+      this.webshare = {
+        enabled: !!raw.enabled,
+        host: String(raw.host || 'p.webshare.io'),
+        port: Number(raw.port || 80),
+        username: String(raw.username || ''),
+        password: String(raw.password || ''),
+      };
+    } catch (_) {}
+  }
+
+  _saveWebshare() {
+    const file = this._webshareFile();
+    if (!file) return;
+    try {
+      fs.writeFileSync(file + '.tmp', JSON.stringify(this.webshare, null, 2), { mode: 0o600 });
+      fs.renameSync(file + '.tmp', file);
+    } catch (e) { this.lastError = 'webshare save: ' + e.message; }
+  }
+
+  setWebshare(on) {
+    this.webshare.enabled = !!on;
+    if (!this.webshare.enabled) {
+      // Drop per-bot tunnels so the next connect goes back to the public pool.
+      this.assignments.forEach((key, botId) => {
+        if (key.indexOf('webshare:') === 0) this.assignments.delete(botId);
+      });
+    }
+    this._saveWebshare();
+    this._save();
+    return this.webshare.enabled && !!this.webshare.username;
   }
 
   /* ── persistence ── */
@@ -410,15 +495,19 @@ class ProxyPool {
     const usedKeys = new Set();
     const perIp = new Map();
     this.assignments.forEach((key, botId) => {
-      const p = this.alive.get(key);
-      if (!p || (validIds && !validIds.has(botId)) || usedKeys.has(key)
-          || (perIp.get(p.host) || 0) >= this.opts.maxPerIp) {
+      const virtual = key.indexOf('webshare:') === 0;
+      const p = virtual ? null : this.alive.get(key);
+      // A virtual pin is its own address: each bot gets a fresh tunnel/IP.
+      const bucket = virtual ? key : (p && p.host);
+      if (!bucket || (virtual && (!this.webshare.enabled || !this.webshare.username))
+          || (validIds && !validIds.has(botId)) || usedKeys.has(key)
+          || (perIp.get(bucket) || 0) >= this.opts.maxPerIp) {
         this.assignments.delete(botId);
         changed = true;
         return;
       }
       usedKeys.add(key);
-      perIp.set(p.host, (perIp.get(p.host) || 0) + 1);
+      perIp.set(bucket, (perIp.get(bucket) || 0) + 1);
     });
     if (changed) this._save();
   }
@@ -430,9 +519,11 @@ class ProxyPool {
     const counts = new Map();
     this.assignments.forEach((key, botId) => {
       if (botId === exceptBotId) return;
-      const p = this.alive.get(key);
-      if (!p) return;
-      counts.set(p.host, (counts.get(p.host) || 0) + 1);
+      const virtual = key.indexOf('webshare:') === 0;
+      const p = virtual ? null : this.alive.get(key);
+      if (!virtual && !p) return;
+      const bucket = virtual ? key : p.host;
+      counts.set(bucket, (counts.get(bucket) || 0) + 1);
     });
     return counts;
   }
@@ -442,6 +533,18 @@ class ProxyPool {
     if (!this.opts.enabled) return null;
     if (name) this.names.set(botId, name);
     this._pruneAssignments();
+    if (this.webshare.enabled && this.webshare.username) {
+      // Every CONNECT to the rotating endpoint exits at a different IP, so
+      // each bot gets its own tunnel and its own address.
+      const key = 'webshare:' + botId;
+      this.assignments.set(botId, key);
+      this._save();
+      return {
+        ip: this.webshare.host, port: this.webshare.port, key,
+        username: this.webshare.username, password: this.webshare.password,
+        protocol: 'http', virtual: true, latency: 0,
+      };
+    }
     const assigned = this.assignments.get(botId);
     if (assigned) {
       const p = this.alive.get(assigned);
@@ -467,12 +570,11 @@ class ProxyPool {
   /** Dial the game server through a proxy, resolving a ready socket. */
   open(proxy, host, port, timeoutMs) {
     if (!proxy) return Promise.reject(new Error('no proxy'));
-    return socks5Connect(
-      { host: proxy.ip || proxy.host, port: proxy.port, username: proxy.username, password: proxy.password },
-      host || this.target.host,
-      port || this.target.port,
-      timeoutMs || 8000
-    );
+    const target = { host: proxy.ip || proxy.host, port: proxy.port, username: proxy.username, password: proxy.password };
+    const destHost = host || this.target.host;
+    const destPort = port || this.target.port;
+    if (proxy.protocol === 'http') return httpConnect(target, destHost, destPort, timeoutMs || 9000);
+    return socks5Connect(target, destHost, destPort, timeoutMs || 8000);
   }
 
   reportOk(proxy) {
@@ -535,10 +637,13 @@ class ProxyPool {
   status() {
     const botsByKey = new Map();
     const perIp = new Map();
+    let webshareBots = 0;
     let collisions = 0;
     this.assignments.forEach((key, botId) => {
       if (!botsByKey.has(key)) botsByKey.set(key, []);
       botsByKey.get(key).push(this.names.get(botId) || botId);
+      const virtual = key.indexOf('webshare:') === 0;
+      if (virtual) { webshareBots++; return; }
       const p = this.alive.get(key);
       if (!p) return;
       perIp.set(p.host, (perIp.get(p.host) || 0) + 1);
@@ -569,6 +674,14 @@ class ProxyPool {
       target: this.target,
       lastError: this.lastError,
       sources: SOURCES.length,
+      webshare: {
+        enabled: this.webshare.enabled && !!this.webshare.username,
+        host: this.webshare.host,
+        port: this.webshare.port,
+        user: this.webshare.username ? this.webshare.username.slice(0, 4) + '••••' : '',
+        mode: 'rotating',
+        bots: webshareBots,
+      },
       proxies,
     };
   }

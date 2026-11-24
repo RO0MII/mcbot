@@ -925,7 +925,8 @@ function scoresHtml() {
 function pxLatencyClass(ms) { return ms <= 700 ? 'is-good' : ms <= 1500 ? 'is-ok' : 'is-slow'; }
 function pxSig(p) {
   if (!p) return 'none';
-  return [p.enabled, p.total, p.assigned, p.uniqueIps, p.collisions, p.refreshing, p.maxPerIp, p.proxies.map((x) => x.key + ':' + x.bots.length).join(',')].join('|');
+  const ws = p.webshare || {};
+  return [p.enabled, p.total, p.assigned, p.uniqueIps, p.collisions, p.refreshing, p.maxPerIp, ws.enabled, ws.bots, p.proxies.map((x) => x.key + ':' + x.bots.length).join(',')].join('|');
 }
 function pxStat(label, value, hint, cls) {
   return '<div class="pxstat' + (cls ? ' ' + cls : '') + '"><span>' + esc(label) + '</span><b>' + esc(value) + '</b><em>' + esc(hint) + '</em></div>';
@@ -963,7 +964,11 @@ function proxyBodyHtml(p) {
   const refreshNote = p.refreshing
     ? '<span class="pxspin"><i></i>testing routes…</span>'
     : '<span class="pxmeta">' + (p.lastRefresh ? 'swept ' + fmtDuration(Date.now() - p.lastRefresh) + ' ago' : 'not swept yet') + '</span>';
+  const ws = p.webshare || { enabled: false, bots: 0, user: '', mode: 'rotating' };
+  const webshareBlock = '<div class="pxcontrols__state"><span class="switch' + (ws.enabled ? ' is-on' : '') + '" role="switch" aria-checked="' + (ws.enabled ? 'true' : 'false') + '" data-action="proxy-webshare" tabindex="0"><span class="switch__track"><span class="switch__thumb"></span></span><span class="switch__label">' + (ws.enabled ? 'On' : 'Off') + '</span></span>'
+    + '<div><b>Webshare rotating</b><span>' + (ws.user ? esc(ws.user) + ' · ' : '') + 'fresh IP per bot · ' + ws.bots + ' pinned</span></div></div>';
   const controls = '<div class="pxcontrols">'
+    + webshareBlock
     + '<div class="pxcontrols__state"><span class="switch' + (p.enabled ? ' is-on' : '') + '" role="switch" aria-checked="' + (p.enabled ? 'true' : 'false') + '" data-action="proxy-toggle" tabindex="0"><span class="switch__track"><span class="switch__thumb"></span></span><span class="switch__label">' + (p.enabled ? 'On' : 'Off') + '</span></span>'
     + '<div><b>Automatic proxy pool</b><span>Fetch · verify · pin · fail over</span></div></div>'
     + '<div class="pxcontrols__right">' + refreshNote
@@ -988,7 +993,7 @@ function proxyBodyHtml(p) {
 function proxiesHtml() {
   const p = state.proxy;
   return '<div class="page-head"><div><span class="eyebrow"><i></i> Egress</span><h2>Proxies</h2>'
-    + '<p>Each bot gets its own SOCKS5 address — one bot per IP — with a different route on every reconnect. Direct is only a last resort.</p></div>'
+    + '<p>Each bot gets its own address — one bot per IP — through the public SOCKS5 pool or a Webshare rotating tunnel. Direct is only a last resort.</p></div>'
     + '<div class="page-head__actions">'
     + '<button class="btn btn-ghost" data-action="proxy-refresh">' + icon('restart') + '<span>Refresh pool</span></button>'
     + '<button class="btn btn-primary" data-action="proxy-apply">' + icon('zap') + '<span>Apply to fleet</span></button>'
@@ -1313,6 +1318,7 @@ function handleAction(action, el) {
     if (action === 'proxy-refresh') return proxyPost({ refresh: true }, 'Refreshing pool', 'Testing SOCKS5 routes — this takes about a minute.');
     if (action === 'proxy-reshuffle') return proxyPost({ reshuffle: true }, 'Assignments cleared', 'Bots pick a new IP on their next reconnect.');
     if (action === 'proxy-toggle') { const on = !(state.proxy && state.proxy.enabled); return proxyPost({ enabled: on }, 'Proxy pool ' + (on ? 'on' : 'off'), on ? 'New connections route through the pool.' : 'Direct connections only from now on.'); }
+    if (action === 'proxy-webshare') { const on = !(state.proxy && state.proxy.webshare && state.proxy.webshare.enabled); return proxyPost({ webshare: on }, 'Webshare ' + (on ? 'on' : 'off'), on ? 'Each bot opens its own rotating tunnel with a fresh IP.' : 'Bots fall back to the public SOCKS5 pool.'); }
     if (action === 'proxy-apply') return proxyPost({ apply: true }, 'Re-homing fleet', 'One bot every 7 seconds, so the fleet never drops at once.');
     if (action === 'refresh') { return api('/api/state').then((d) => { state.bots = Array.isArray(d.bots) ? d.bots : []; state.stats = d.stats || {}; renderAll(); toast('ok', 'Refreshed', 'State synced.'); }).catch((e) => toast('err', 'Refresh failed', e.message)); }
     return Promise.resolve();
