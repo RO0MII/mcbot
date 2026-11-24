@@ -78,31 +78,8 @@ const clean = (s, max = 512) => String(s == null ? '' : s).replace(/\r/g, '').sl
 const stripColor = (s) => String(s == null ? '' : s).replace(/§[0-9a-fk-or]/gi, '');
 const mask = (s) => '•'.repeat(Math.min(String(s || '').length, 12));
 
-// Kick/ban reasons arrive as deeply nested chat components, often as a JSON
-// string thousands of chars long. Truncating first hides the actual reason,
-// so flatten the tree and only then cut it.
-function chatText(reason) {
-  const read = (v, out) => {
-    if (v == null) return out;
-    if (typeof v === 'string') {
-      const t = v.trim();
-      if (!t) return out;
-      if (t[0] === '{' || t[0] === '[') {
-        try { return read(JSON.parse(t), out); } catch (_) { out.push(v); return out; }
-      }
-      out.push(v);
-      return out;
-    }
-    if (Array.isArray(v)) { v.forEach((x) => read(x, out)); return out; }
-    if (typeof v === 'object') {
-      if (typeof v.text === 'string') out.push(v.text);
-      else if (typeof v.translate === 'string') out.push(v.translate);
-      if (v.extra) read(v.extra, out);
-    }
-    return out;
-  };
-  return stripColor(read(reason, []).join(' ')).replace(/\s+/g, ' ').trim();
-}
+// Kick reasons vary by protocol version — flatten them before truncating.
+const { chatText } = require('./chat-text');
 
 function log(...args) {
   const t = new Date().toLocaleTimeString('en-GB', { hour12: false });
@@ -467,7 +444,8 @@ class ManagedBot {
       banned: !!this._banText,
       banText: this._banText,
       permanentBan: !!this._permanentBan,
-      appealUrl: (this._banText.match(/https?:\/\/[^\s]+/i) || [null])[0],
+      appealUrl: (this._banText.match(/https?:\/\/[^\s]+/i) || [null])[0]
+        || (/hungrybirds/i.test(this.host) ? 'https://discord.gg/sgrcFUdjXU' : null),
       lastKick: this._lastKick || null,
       loggedIn: this.loggedIn,
       loginAttempts: this.loginAttempts,
@@ -721,7 +699,6 @@ class ManagedBot {
     this._stopAfk();
     this._guardKicked = false;
     this._sawKick = false;
-    this._lastKick = '';
     this._loginPromptSeen = false;
     this._loginCooldown = 0;
     this._loginGaveUp = false;
@@ -813,6 +790,7 @@ class ManagedBot {
       this._permanentBan = false;
       this._pauseLogged = false;
       this._diagDone = false;
+      this._lastKick = '';
       this.setStatus('online', 'Online');
       this.addLog('ok', `Joined ${this.host}:${this.port} as ${this.name}`);
 
@@ -1360,7 +1338,7 @@ function normalizeConfig(input, existing) {
     throw new Error('Server IP / host looks invalid.');
   }
   const port = clamp(parseInt(src.port, 10) || 25565, 1, 65535);
-  let version = clean(src.version, 20).trim() || '1.20.1';
+  let version = clean(src.version, 20).trim() || '1.21.11';
   if (/^auto$/i.test(version)) version = 'auto';
   const password = clean(src.password == null ? DEFAULT_MC_PASSWORD : src.password, 64).trim();
   if (!password) throw new Error('Password cannot be empty.');

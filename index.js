@@ -13,7 +13,7 @@ const { Vec3 } = require('vec3');
 // ---- Settings ----
 const DEFAULT_IP = 'play.bananasmp.net';   // Used when you just press Enter on the IP prompt
 const DEFAULT_PORT = 25565;       // Default Minecraft port
-const VERSION = '1.20.1';         // Fixed version = skip the auto-detect ping round-trip, so the FIRST join is fast. Set false to auto-detect.
+const VERSION = '1.21.11';        // Fixed version = skip the auto-detect ping round-trip, so the FIRST join is fast. Set false to auto-detect.
 const ENABLE_DISCORD = false;     // Set true to start Discord bridge
 const AUTO_RECONNECT = true;      // Keep retrying while the server boots (Aternos)
 const RECONNECT_DELAY = 5000;     // ms between retries

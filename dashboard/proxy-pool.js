@@ -180,8 +180,14 @@ function httpConnect(proxy, host, port, timeoutMs) {
       const line = buf.slice(0, cut).toString('latin1').split('\r\n')[0] || '';
       const code = Number((line.match(/\s(\d{3})\s/) || [])[1] || 0);
       if (code !== 200) return finish(new Error('proxy CONNECT ' + (code || 'rejected')));
-      buf = buf.slice(cut + 4);
+      const rest = buf.slice(cut + 4);
       finish(null);
+      // Keep the tunnel quiet until minecraft-protocol pipes it. A socket left
+      // flowing with no 'data' listener drops bytes, and bytes that arrived in
+      // the same chunk as the CONNECT reply are lost outright — both desync the
+      // decoder and surface as "Missing characters in string".
+      sock.pause();
+      if (rest.length) sock.unshift(rest);
     };
     sock.on('connect', () => {
       const auth = proxy.username

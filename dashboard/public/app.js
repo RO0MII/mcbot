@@ -1390,7 +1390,7 @@ function openFleetSetup() {
     + '<div class="modal-grid">'
     + '<label class="field"><span class="field__label">Server IP</span><span class="field__box"><input name="host" placeholder="play.example.org" required /></span></label>'
     + '<label class="field"><span class="field__label">Port</span><span class="field__box"><input name="port" type="number" value="25565" min="1" max="65535" /></span></label>'
-    + '<label class="field"><span class="field__label">Version</span><span class="field__box"><input name="version" value="1.20.1" /></span></label>'
+    + '<label class="field"><span class="field__label">Version</span><span class="field__box"><input name="version" value="1.21.11" /></span></label>'
     + '<label class="field"><span class="field__label">Minecraft password</span><span class="field__box"><input name="password" type="password" value="Sandun123" /></span></label>'
     + '</div>'
     + '<div class="modal-toggles">'
@@ -1415,7 +1415,7 @@ async function submitFleetSetup(form) {
     names: String(fd.get('names') || ''),
     host: String(fd.get('host') || '').trim(),
     port: Number(fd.get('port') || 25565),
-    version: String(fd.get('version') || '1.20.1').trim(),
+    version: String(fd.get('version') || '1.21.11').trim(),
     password: String(fd.get('password') || 'Sandun123'),
     autoLogin: fd.get('autoLogin') === 'on',
     autoReconnect: fd.get('autoReconnect') === 'on',
@@ -1453,7 +1453,7 @@ function openAddBot() {
     + '<label class="field"><span class="field__label">Bot name</span><span class="field__box"><input name="name" maxlength="16" placeholder="e.g. adalei" required /></span></label>'
     + '<label class="field"><span class="field__label">Server IP</span><span class="field__box"><input name="host" placeholder="mc.example.org" required /></span></label>'
     + '<label class="field"><span class="field__label">Port</span><span class="field__box"><input name="port" type="number" value="25565" min="1" max="65535" /></span></label>'
-    + '<label class="field"><span class="field__label">Version</span><span class="field__box"><input name="version" value="1.20.1" /></span></label>'
+    + '<label class="field"><span class="field__label">Version</span><span class="field__box"><input name="version" value="1.21.11" /></span></label>'
     + '</div>'
     + '<label class="field"><span class="field__label">Minecraft password</span><span class="field__box"><input name="password" type="password" value="Sandun123" /></span></label>'
     + '<div class="modal-toggles">'
@@ -1476,7 +1476,7 @@ async function submitAddBot(form) {
     name: String(fd.get('name') || '').trim(),
     host: String(fd.get('host') || '').trim(),
     port: Number(fd.get('port') || 25565),
-    version: String(fd.get('version') || '1.20.1').trim(),
+    version: String(fd.get('version') || '1.21.11').trim(),
     password: String(fd.get('password') || 'Sandun123'),
     autoLogin: fd.get('autoLogin') === 'on',
     autoReconnect: fd.get('autoReconnect') === 'on',

@@ -119,7 +119,7 @@ function openBotModal(id, prefill = {}) {
     name: '',
     host: prefill.host || '',
     port: prefill.port || 25565,
-    version: '1.20.1',
+    version: '1.21.11',
     password: 'Sandun123',
     autoLogin: true,
     autoSwitch: false,
@@ -183,7 +183,7 @@ function openBotModal(id, prefill = {}) {
               <label class="field">
                 <span class="field__label">Minecraft version</span>
                 <span class="field__control">
-                  <input name="version" value="${esc(b.version)}" placeholder="1.20.1 or auto" autocomplete="off" spellcheck="false" />
+                  <input name="version" value="${esc(b.version)}" placeholder="1.21.11 or auto" autocomplete="off" spellcheck="false" />
                 </span>
                 <span class="field__hint">Use <b>auto</b> to detect the server version.</span>
               </label>
@@ -264,7 +264,7 @@ function openBotModal(id, prefill = {}) {
       name: String(fd.get('name') || '').trim(),
       host: String(fd.get('host') || '').trim(),
       port: Number(fd.get('port')) || 25565,
-      version: String(fd.get('version') || '').trim() || '1.20.1',
+      version: String(fd.get('version') || '').trim() || '1.21.11',
       password: String(fd.get('password') || ''),
       switchCommand: String(fd.get('switchCommand') || '').trim() || '/server oneblock',
       switchDelay: Number(fd.get('switchDelay')) || 4000,
