@@ -1667,3 +1667,14 @@ a { color: inherit; }
 /* ── ban appeal ─────────────────────────────────────────────────────────── */
 .pcard__alert-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .pcard__alert-actions .btn { text-decoration: none; }
+
+/* ── bot egress IP on the card ─────────────────────────────────────────── */
+.bot-route {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 8px;
+  padding: 6px 9px; border: 1px dashed var(--line-2); border-radius: 9px;
+  color: var(--muted); font: 600 10px var(--font-body); min-width: 0;
+}
+.bot-route .ico { width: 13px; height: 13px; color: var(--faint); flex: none; }
+.bot-route span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-route.is-proxied { border-style: solid; border-color: var(--brand-line); background: var(--brand-soft); color: var(--brand-2); }
+.bot-route.is-proxied .ico { color: var(--brand-2); }
