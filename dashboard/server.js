@@ -1404,8 +1404,16 @@ class ManagedBot {
         return;
       }
       if (now() > deadline) {
-        this._cancelAfkSequence();
-        this.addLog('warn', 'AFK: no arena teleport detected — skipping the one-time move.');
+        // Some bots are already standing in the arena when /afk is repeated;
+        // the server then sends no teleport message. Treat those coordinates
+        // as arena entry so they still get their one-time outward walk.
+        const nearArena = Math.hypot(p.x, p.z) <= 3 && Math.abs(p.y - 73) <= 4;
+        if (nearArena) {
+          this._afkTeleportDetected('already in arena');
+        } else {
+          this._cancelAfkSequence();
+          this.addLog('warn', 'AFK: no arena teleport detected — skipping the one-time move.');
+        }
       }
     }, 500);
   }
@@ -1458,10 +1466,10 @@ class ManagedBot {
       this._finishAfkWalk(`${net.toFixed(1)} of ${this._afkTarget} blocks (arena limit) — stopped`);
       return;
     }
-    // Mineflayer's forward vector is (-sin(yaw), 0, cos(yaw)). Reverse that to
-    // point along the current outward vector from spawn.
+    // Mineflayer's forward vector is (-sin(yaw), -cos(yaw)); match lookAt's
+    // convention so we keep walking along the outward vector from spawn.
     const outward = net > 0.5
-      ? Math.atan2(-(cur.x - origin.x), cur.z - origin.z)
+      ? Math.atan2(-(cur.x - origin.x), -(cur.z - origin.z))
       : this._afkWalkYaw;
     const offsets = net > 0.5
       ? [0, 0.35, -0.35, 0.7, -0.7, 1.1, -1.1]
