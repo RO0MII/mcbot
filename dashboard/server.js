@@ -856,7 +856,9 @@ class ManagedBot {
       this._permanentBan = false;
       this._pauseLogged = false;
       this._lastKick = '';
-      this.setStatus('online', 'Online');
+      // An AFK-arena teleport can emit another spawn event. Keep the arena
+      // label instead of overwriting it with the generic "Online" text.
+      this.setStatus('online', this._inAfkArena ? 'AFK arena' : 'Online');
       this.addLog('ok', `Joined ${this.host}:${this.port} as ${this.name}`);
 
       this._startAfk();
