@@ -284,10 +284,11 @@ const OFFLINE_CODES = ['ECONNRESET', 'ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', '
 
 // /afk → GUI slot 1 → 5..4..3..2..1 → AFK arena → ONE short random walk.
 // The walk is ordinary movement (no mining / digging / placing).
-// The arena pen is tiny. One short step away is the whole walk — aiming for
-// 5–15 blocks keeps re-aiming and ends up walking the bot back to spawn.
-const AFK_WALK_MIN = 1;
-const AFK_WALK_MAX = 2;
+// One outward walk after the arena teleport. The arena is small, but the
+// target stays at 5–10 blocks as requested; the walk keeps its heading and
+// stops when reached or when the arena boundary blocks further progress.
+const AFK_WALK_MIN = 5;
+const AFK_WALK_MAX = 10;
 const AFK_TELEPORT_WATCH_MS = 60000;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1447,7 +1448,7 @@ class ManagedBot {
     this._afkTarget = AFK_WALK_MIN + Math.floor(Math.random() * (AFK_WALK_MAX - AFK_WALK_MIN + 1));
     this._afkWalkMoved = 0;
     this._afkWalkLegs = 0;
-    this._afkWalkDeadline = now() + 14000;
+    this._afkWalkDeadline = now() + 25000;
     this.addLog('info', `AFK arena: one continuous walk of ${this._afkTarget} blocks away from spawn (walking only).`);
     this._afkWalkStep();
   }
@@ -1466,7 +1467,7 @@ class ManagedBot {
       this._finishAfkWalk(`${net.toFixed(1)} blocks from spawn — stopped`);
       return;
     }
-    if (this._afkWalkLegs >= 12 || now() > this._afkWalkDeadline) {
+    if (this._afkWalkLegs >= 20 || now() > this._afkWalkDeadline) {
       this._finishAfkWalk(`${net.toFixed(1)} of ${this._afkTarget} blocks (arena limit) — stopped`);
       return;
     }
@@ -1497,7 +1498,8 @@ class ManagedBot {
       return;
     }
     this._afkWalkTimer = setTimeout(() => {
-      try { b.setControlState('forward', false); } catch (_) {}
+      // Keep "forward" held between steps. Releasing it every 1.2s lets the
+      // server rubber-band the bot back to the arena centre.
       const p = this.bot && this.bot.entity && this.bot.entity.position;
       const jumped = p && (Math.hypot(p.x - stepStart.x, p.z - stepStart.z) > 7 || Math.abs(p.y - stepStart.y) > 4);
       if (jumped) {
@@ -1510,7 +1512,7 @@ class ManagedBot {
         this._finishAfkWalk(`${after.toFixed(1)} blocks from spawn — stopped`);
         return;
       }
-      if (this._afkWalkLegs >= 12 || now() > this._afkWalkDeadline) {
+      if (this._afkWalkLegs >= 20 || now() > this._afkWalkDeadline) {
         this._finishAfkWalk(`${after.toFixed(1)} of ${this._afkTarget} blocks (arena limit) — stopped`);
         return;
       }
