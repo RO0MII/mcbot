@@ -29,10 +29,11 @@ const statusMeta = (bot) => ({
   connecting: { label: 'Connecting', pill: 'pill--connecting', dot: 'connecting' },
   reconnecting: { label: 'Retrying', pill: 'pill--connecting', dot: 'connecting' },
   error: { label: 'Error', pill: 'pill--error', dot: 'error' },
+  banned: { label: 'Banned', pill: 'pill--error', dot: 'error' },
   stopped: { label: 'Stopped', pill: 'pill--stopped', dot: 'stopped' },
   offline: { label: 'Offline', pill: 'pill--offline', dot: 'stopped' },
 })[bot && bot.status] || { label: 'Offline', pill: 'pill--offline', dot: 'stopped' };
-const isActive = (bot) => !!bot && ['online', 'connecting', 'reconnecting'].includes(bot.status);
+const isActive = (bot) => !!bot && ['online', 'connecting', 'reconnecting', 'banned'].includes(bot.status);
 const findBot = (id) => (state.bots || []).find((b) => b.id === id) || null;
 const initial = (name) => String(name || '?').trim().charAt(0).toUpperCase() || '?';
 const serverKey = (b) => b.host + ':' + b.port;
@@ -480,7 +481,7 @@ function heroHtml() {
     + '<span class="eyebrow"><i></i> Control center</span>'
     + '<h1>Your fleet, <em>live</em>.</h1>'
     + '<p>' + esc(line) + '</p>'
-    + '<div class="hero__actions"><button class="btn btn-primary" data-action="add">' + icon('plus') + '<span>Add bot</span></button><button class="btn btn-ghost" data-action="refresh">' + icon('restart') + '<span>Refresh</span></button></div>'
+    + '<div class="hero__actions"><button class="btn btn-primary" data-action="add">' + icon('plus') + '<span>Add bot</span></button><button class="btn btn-ghost" data-action="setup">' + icon('layers') + '<span>Fleet setup</span></button><button class="btn btn-ghost" data-action="refresh">' + icon('restart') + '<span>Refresh</span></button></div>'
     + '</div>'
     + '<div class="hero__stage" aria-hidden="true"><div class="stage stage--float"><div class="stage__ring"></div><div class="cube-wrap"><div class="cube">'
     + '<span class="cube__f cube__f--f"></span><span class="cube__f cube__f--b"></span><span class="cube__f cube__f--r"></span><span class="cube__f cube__f--l"></span><span class="cube__f cube__f--t"></span><span class="cube__f cube__f--u"></span>'
@@ -746,6 +747,8 @@ function playerCardHtml(bot) {
     + '<span class="pcard__spacer"></span>'
     + '<button class="btn btn-primary btn-sm" data-action="add">' + icon('plus') + '<span>New bot</span></button>'
     + '</div>'
+    + '<div class="pcard__alert' + (bot.banned ? '' : ' hidden') + '" data-f="pc-alert">' + icon('alert')
+    + '<div><b>Banned by the server</b><span data-f="pc-alert-text">' + esc(bot.banText || '') + '</span></div></div>'
     + '</section>';
 }
 
@@ -824,6 +827,12 @@ function patchBotPage(bot) {
     }
   }
   const pq = root.querySelector('[data-f="pc-quality"]'); if (pq) pq.textContent = pingQuality(bot.ping);
+  const alertEl = root.querySelector('[data-f="pc-alert"]');
+  if (alertEl) {
+    alertEl.classList.toggle('hidden', !bot.banned);
+    const at = alertEl.querySelector('[data-f="pc-alert-text"]');
+    if (at && bot.banned && at.textContent !== (bot.banText || '')) at.textContent = bot.banText || '';
+  }
   const route = root.querySelector('[data-f="pc-route"]');
   if (route) {
     const sig = bot.proxy ? bot.proxy.ip + ':' + bot.proxy.port : 'direct';
@@ -1243,6 +1252,7 @@ function handleAction(action, el) {
     if (action === 'console' && id) { state.botId = id; switchView('bot'); return Promise.resolve(); }
     if (action === 'bot-page' && id) { state.botId = id; switchView('bot'); return Promise.resolve(); }
     if (action === 'add') { openAddBot(); return Promise.resolve(); }
+    if (action === 'setup') { openFleetSetup(); return Promise.resolve(); }
     if (action === 'master') { toggleMaster(); return Promise.resolve(); }
     if (action === 'proxy-refresh') return proxyPost({ refresh: true }, 'Refreshing pool', 'Testing SOCKS5 routes — this takes about a minute.');
     if (action === 'proxy-reshuffle') return proxyPost({ reshuffle: true }, 'Assignments cleared', 'Bots pick a new IP on their next reconnect.');
@@ -1275,6 +1285,70 @@ async function submitBotCommand(form) {
 }
 
 /* ── add bot modal ── */
+function openFleetSetup() {
+  const root = $('#modal-root'); if (!root) return;
+  root.hidden = false;
+  root.innerHTML = '<div class="modal-backdrop" data-close="1"></div>'
+    + '<div class="modal-card modal-card--wide" role="dialog" aria-modal="true" aria-labelledby="fleet-title">'
+    + '<div class="modal-head"><h2 id="fleet-title">Fleet setup</h2><button class="icon-btn" type="button" data-close="1" aria-label="Close">' + icon('x') + '</button></div>'
+    + '<form id="fleet-form" class="modal-body" autocomplete="off">'
+    + '<p class="fleet__note">' + icon('shield') + '<span><b>One bot, one IP.</b> Each name gets its own SOCKS5 route. Joins are staggered automatically.</span></p>'
+    + '<label class="field"><span class="field__label">Player names — one per line</span>'
+    + '<textarea name="names" class="fleet__names" rows="6" spellcheck="false" placeholder="PlayerOne' + String.fromCharCode(10) + 'PlayerTwo" required></textarea></label>'
+    + '<div class="modal-grid">'
+    + '<label class="field"><span class="field__label">Server IP</span><span class="field__box"><input name="host" placeholder="play.example.org" required /></span></label>'
+    + '<label class="field"><span class="field__label">Port</span><span class="field__box"><input name="port" type="number" value="25565" min="1" max="65535" /></span></label>'
+    + '<label class="field"><span class="field__label">Version</span><span class="field__box"><input name="version" value="1.20.1" /></span></label>'
+    + '<label class="field"><span class="field__label">Minecraft password</span><span class="field__box"><input name="password" type="password" value="Sandun123" /></span></label>'
+    + '</div>'
+    + '<div class="modal-toggles">'
+    + '<label class="check"><input type="checkbox" name="autoLogin" checked /> Auto-login</label>'
+    + '<label class="check"><input type="checkbox" name="autoReconnect" checked /> Auto-reconnect</label>'
+    + '<label class="check"><input type="checkbox" name="antiAfk" /> Anti-AFK</label>'
+    + '<label class="check"><input type="checkbox" name="autoEat" checked /> Auto-eat</label>'
+    + '<label class="check fleet__danger"><input type="checkbox" name="replace" checked /> Replace current fleet</label>'
+    + '<label class="check"><input type="checkbox" name="start" checked /> Start after import</label>'
+    + '</div>'
+    + '<p id="fleet-error" class="login__error" hidden></p>'
+    + '<div class="modal-actions"><button type="button" class="btn btn-ghost" data-close="1">Cancel</button><button class="btn btn-primary" type="submit">' + icon('zap') + '<span>Import fleet</span></button></div>'
+    + '</form></div>';
+  const first = root.querySelector('textarea[name="names"]');
+  if (first) setTimeout(() => { try { first.focus(); } catch (e) {} }, 40);
+}
+
+async function submitFleetSetup(form) {
+  const err = $('#fleet-error');
+  const fd = new FormData(form);
+  const body = {
+    names: String(fd.get('names') || ''),
+    host: String(fd.get('host') || '').trim(),
+    port: Number(fd.get('port') || 25565),
+    version: String(fd.get('version') || '1.20.1').trim(),
+    password: String(fd.get('password') || 'Sandun123'),
+    autoLogin: fd.get('autoLogin') === 'on',
+    autoReconnect: fd.get('autoReconnect') === 'on',
+    antiAfk: fd.get('antiAfk') === 'on',
+    autoEat: fd.get('autoEat') === 'on',
+    replace: fd.get('replace') === 'on',
+    start: fd.get('start') === 'on',
+  };
+  if (err) { err.textContent = ''; err.setAttribute('hidden', ''); }
+  const btn = form.querySelector('button[type="submit"]');
+  if (btn) btn.disabled = true;
+  try {
+    const d = await api('/api/bots/import', { method: 'POST', body: JSON.stringify(body) });
+    await api('/api/proxies', { method: 'POST', body: { maxPerIp: 1, reshuffle: true } });
+    closeModal();
+    toast('ok', 'Fleet imported', d.created + ' bot' + (d.created === 1 ? '' : 's') + ' · one IP each, joining staggered.');
+    const st = await api('/api/state');
+    state.bots = Array.isArray(st.bots) ? st.bots : [];
+    state.stats = st.stats || {};
+    state.proxy = null;
+    renderAll();
+  } catch (e) { if (err) { err.textContent = e.message; err.removeAttribute('hidden'); } }
+  finally { if (btn) btn.disabled = false; }
+}
+
 function openAddBot() {
   const root = $('#modal-root');
   if (!root) return;
@@ -1407,6 +1481,7 @@ function init() {
     if (!e.target) return;
     if (e.target.id === 'bot-command-form') { e.preventDefault(); submitBotCommand(e.target); }
     else if (e.target.id === 'add-bot-form') { e.preventDefault(); submitAddBot(e.target); }
+    else if (e.target.id === 'fleet-form') { e.preventDefault(); submitFleetSetup(e.target); }
   });
 
   document.addEventListener('error', (e) => {

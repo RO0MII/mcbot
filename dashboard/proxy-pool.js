@@ -29,7 +29,7 @@ const SOURCES = [
 
 const DEFAULTS = {
   enabled: true,
-  maxPerIp: 5,
+  maxPerIp: 1,
   validateTimeout: 4500,
   validateConcurrency: 50,
   maxCandidates: 700,
@@ -184,7 +184,7 @@ class ProxyPool {
   }
 
   setMaxPerIp(n) {
-    this.opts.maxPerIp = clamp(Number(n) || 5, 1, 50);
+    this.opts.maxPerIp = clamp(Number(n) || 1, 1, 50);
     this._save();
     return this.opts.maxPerIp;
   }
@@ -196,7 +196,7 @@ class ProxyPool {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
       if (raw && typeof raw === 'object') {
         if (typeof raw.enabled === 'boolean') this.opts.enabled = raw.enabled;
-        if (raw.maxPerIp) this.opts.maxPerIp = clamp(Number(raw.maxPerIp) || 5, 1, 50);
+        if (raw.maxPerIp) this.opts.maxPerIp = clamp(Number(raw.maxPerIp) || this.opts.maxPerIp, 1, 50);
         if (raw.assignments && typeof raw.assignments === 'object') {
           Object.keys(raw.assignments).forEach((k) => this.assignments.set(k, raw.assignments[k]));
         }

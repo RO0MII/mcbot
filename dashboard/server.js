@@ -68,6 +68,32 @@ const clean = (s, max = 512) => String(s == null ? '' : s).replace(/\r/g, '').sl
 const stripColor = (s) => String(s == null ? '' : s).replace(/§[0-9a-fk-or]/gi, '');
 const mask = (s) => '•'.repeat(Math.min(String(s || '').length, 12));
 
+// Kick/ban reasons arrive as deeply nested chat components, often as a JSON
+// string thousands of chars long. Truncating first hides the actual reason,
+// so flatten the tree and only then cut it.
+function chatText(reason) {
+  const read = (v, out) => {
+    if (v == null) return out;
+    if (typeof v === 'string') {
+      const t = v.trim();
+      if (!t) return out;
+      if (t[0] === '{' || t[0] === '[') {
+        try { return read(JSON.parse(t), out); } catch (_) { out.push(v); return out; }
+      }
+      out.push(v);
+      return out;
+    }
+    if (Array.isArray(v)) { v.forEach((x) => read(x, out)); return out; }
+    if (typeof v === 'object') {
+      if (typeof v.text === 'string') out.push(v.text);
+      else if (typeof v.translate === 'string') out.push(v.translate);
+      if (v.extra) read(v.extra, out);
+    }
+    return out;
+  };
+  return stripColor(read(reason, []).join(' ')).replace(/\s+/g, ' ').trim();
+}
+
 function log(...args) {
   const t = new Date().toLocaleTimeString('en-GB', { hour12: false });
   console.log(`\x1b[2m[${t}]\x1b[0m`, ...args);
@@ -288,6 +314,8 @@ class ManagedBot {
     this._throttleHits = 0;
     this._rateLimitedUntil = 0;
     this._bannedUntil = 0;
+    this._banText = '';
+    this._diagDone = false;
     this._gateTimer = null;
     this.loggedIn = false;
     this.loginAttempts = 0;
@@ -421,6 +449,8 @@ class ManagedBot {
       ping: this.ping,
       proxy: this.proxy,
       proxySince: this.proxySince,
+      banned: !!this._banText,
+      banText: this._banText,
       loggedIn: this.loggedIn,
       loginAttempts: this.loginAttempts,
       switched: this.switched,
@@ -691,6 +721,9 @@ class ManagedBot {
       this._retries = 0;
       this._throttleHits = 0;
       this._rateLimitedUntil = 0;
+      this._bannedUntil = 0;
+      this._banText = '';
+      this._diagDone = false;
       this.setStatus('online', 'Online');
       this.addLog('ok', `Joined ${this.host}:${this.port} as ${this.name}`);
 
@@ -725,8 +758,8 @@ class ManagedBot {
     });
 
     bot.on('kicked', (reason) => {
-      const text = typeof reason === 'string' ? reason : (reason && reason.toString ? reason.toString() : String(reason || ''));
-      this.addLog('err', `Kicked by server: ${stripColor(text).slice(0, 160)}`);
+      const text = chatText(reason) || stripColor(String(reason || ''));
+      this.addLog('err', `Kicked by server: ${text.slice(0, 160)}`);
     });
 
     bot.on('messagestr', (message) => this._onMessage(message));
@@ -757,11 +790,12 @@ class ManagedBot {
     bot.on('playerLeft', () => this._refresh(true));
 
     bot.on('kicked', (reason) => {
-      const r = clean(reason, 500);
+      const r = (chatText(reason) || stripColor(String(reason || ''))).slice(0, 600);
       if (/banned/i.test(r)) {
-        this._bannedUntil = now() + 15 * 60 * 1000;
+        this._banText = stripColor(r).replace(/\s+/g, ' ').trim().slice(0, 400);
+        this._bannedUntil = now() + 30 * 60 * 1000;
         blockConnectGate(120000);
-        this.addLog('err', 'This account/IP is banned by the server — retrying slowly. Appeal with the server staff.');
+        this.addLog('err', `BANNED: ${this._banText.slice(0, 200)}`);
       }
       if (/slow down|connecting too quickly|too many connections|rate.?limit|throttl|too fast|try again later|too many login/i.test(r)) {
         this._throttleHits = (this._throttleHits || 0) + 1;
@@ -815,6 +849,13 @@ class ManagedBot {
       this.addLog('warn', 'Disconnected.');
       this.setStatus('reconnecting', 'Disconnected');
       this._retries = (this._retries || 0) + 1;
+      // A SOCKS route can close before the kick packet arrives, hiding the real
+      // reason. Every third attempt goes direct so we can read it.
+      if (!this._diagDone && this._retries >= 3 && this.proxy) {
+        this._diagDone = true;
+        this._directNext = true;
+        this.addLog('info', 'Diagnosing the connection directly to read the server reason…');
+      }
       let delay;
       if (this._bannedUntil && now() < this._bannedUntil) {
         delay = (this._bannedUntil - now()) + Math.floor(Math.random() * 120000);
@@ -839,7 +880,11 @@ class ManagedBot {
       return;
     }
     this.nextRetryAt = now() + delay;
-    this.setStatus('reconnecting', `Retrying in ${Math.round(delay / 1000)}s…`);
+    if (this._banText) {
+      this.setStatus('banned', `Banned · next attempt in ${Math.max(1, Math.round(delay / 60000))} min`);
+    } else {
+      this.setStatus('reconnecting', `Retrying in ${Math.round(delay / 1000)}s…`);
+    }
     this._later(() => {
       if (!this.wanted) return;
       this.addLog('info', 'Reconnecting…');
@@ -1222,7 +1267,7 @@ function normalizeConfig(input, existing) {
     switchCommand,
     switchDelay: clamp(parseInt(src.switchDelay, 10) || 4000, 1000, 60000),
     autoReconnect: src.autoReconnect !== false,
-    antiAfk: src.antiAfk !== false,
+    antiAfk: !!src.antiAfk,
     autoEat: src.autoEat !== false,
     reswitch: !!src.reswitch,
     groupIds: Array.isArray(src.groupIds) ? src.groupIds.filter((id) => typeof id === 'string').slice(0, 50) : [],
@@ -1904,6 +1949,74 @@ async function handleApi(req, res, url) {
     saveConfigs();
     broadcast('stats', stats());
     return json(res, 200, { ok: true, affected: targets.length });
+  }
+
+  // Bulk import / clear — used by the Fleet setup dialog.
+  if (parts[1] === 'bots' && parts[2] === 'clear' && method === 'POST') {
+    let body = {};
+    try { body = await readBody(req) || {}; } catch (_) {}
+    let n = 0;
+    manager.bots.forEach((b) => { b.desiredOn = false; b.stop('Removed by fleet setup'); n++; broadcast('removed', { id: b.id }); });
+    manager.bots.clear();
+    manager.groups.forEach((g) => { g.botIds = []; });
+    saveConfigs();
+    broadcastGroups();
+    proxyPool.reshuffle();
+    return json(res, 200, { ok: true, removed: n });
+  }
+
+  if (parts[1] === 'bots' && parts[2] === 'import' && method === 'POST') {
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+    const raw = typeof body.names === 'string'
+      ? body.names.split(/[\r\n,;\s]+/)
+      : (Array.isArray(body.names) ? body.names : []);
+    const names = [];
+    const seen = new Set();
+    for (const entry of raw) {
+      const nm = clean(entry, 16).trim();
+      if (!/^[A-Za-z0-9_]{1,16}$/.test(nm)) continue;
+      const key = nm.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      names.push(nm);
+    }
+    if (!names.length) return json(res, 400, { error: 'Add at least one valid name — letters, numbers or underscore, max 16 characters.' });
+    if (names.length > 100) return json(res, 400, { error: 'Maximum 100 bots per import.' });
+
+    if (body.replace) {
+      manager.bots.forEach((b) => { b.desiredOn = false; b.stop('Replaced by fleet setup'); broadcast('removed', { id: b.id }); });
+      manager.bots.clear();
+      manager.groups.forEach((g) => { g.botIds = []; });
+    }
+    const base = {
+      host: body.host, port: body.port, version: body.version, password: body.password,
+      autoLogin: body.autoLogin, autoReconnect: body.autoReconnect,
+      antiAfk: body.antiAfk, autoEat: body.autoEat,
+      autoSwitch: body.autoSwitch, switchCommand: body.switchCommand, switchDelay: body.switchDelay,
+    };
+    const created = [];
+    for (const name of names) {
+      let cfg;
+      try { cfg = normalizeConfig(Object.assign({}, base, { name }), null); } catch (e) { continue; }
+      const id = 'b_' + crypto.randomUUID().replace(/-/g, '').slice(0, 10);
+      const bot = new ManagedBot(Object.assign({ id, createdAt: now(), desiredOn: body.start !== false }, cfg), { broadcast, save: saveConfigs });
+      manager.bots.set(id, bot);
+      syncBotGroups(bot);
+      created.push(bot);
+      broadcast('bot', { bot: bot.public() });
+    }
+    saveConfigs();
+    broadcastGroups();
+    // Stagger the joins — one bot every few seconds, never a burst.
+    created.forEach((bot, i) => {
+      if (!bot.desiredOn) return;
+      setTimeout(() => {
+        if (manager.bots.get(bot.id) === bot) bot.start();
+      }, 1500 + i * 5000);
+    });
+    proxyPool.reshuffle();
+    return json(res, 201, { created: created.length, names: created.map((b) => b.name) });
   }
 
   // /api/bots/:id...
