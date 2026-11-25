@@ -72,6 +72,16 @@ An 18-second walkthrough of the real dashboard — login, 15-bot overview, one b
 
 ## Quick start
 
+**One-line install** — downloads the panel, asks for a dashboard password twice, installs dependencies, sets up the systemd service on port 80 and prints the URL:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RO0MII/mcbot/main/install.sh | sudo bash
+```
+
+The password is saved to `/opt/mcbot/panel.env` with mode `600` and attached to the service as a systemd override, so re-running setup cannot wipe it. To set it without prompts: `sudo PANEL_PASSWORD='your-password' bash install.sh` (after downloading the script). Override the defaults with `INSTALL_DIR` and `PORT`.
+
+**Manual install:**
+
 ```bash
 git clone https://github.com/RO0MII/mcbot.git
 cd mcbot

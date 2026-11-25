@@ -259,23 +259,21 @@
           <p class="label">quick start</p>
           <h2>Online in<br />three steps.</h2>
           <ol class="steps">
-            <li><span>01</span><p>Clone the repo and install.</p></li>
-            <li><span>02</span><p>Start the panel with <code>npm start</code>.</p></li>
+            <li><span>01</span><p>Run one install command.</p></li>
+            <li><span>02</span><p>Enter your dashboard password twice.</p></li>
             <li><span>03</span><p>Open port 80 and add your bots.</p></li>
           </ol>
-          <p class="start__note">Set <code>DASHBOARD_PASSWORD</code> before exposing it to the internet.</p>
+          <p class="start__note">The password is saved in <code>panel.env</code> (mode <code>600</code>) — never printed, never committed.</p>
           <a class="btn btn--solid" href="https://github.com/RO0MII/mcbot">Open the repository</a>
         </div>
 
         <div class="codecard">
           <div class="moment__bar"><span class="app__lights"><i></i><i></i><i></i></span> terminal <button class="copy" id="copy" type="button">Copy</button></div>
-          <pre id="code"><code><span class="c-dim"># clone and install</span>
-git clone https://github.com/RO0MII/mcbot.git
-cd mcbot
-npm install
+          <pre id="code"><code><span class="c-dim"># one-line panel install — asks for a password</span>
+curl -fsSL https://raw.githubusercontent.com/RO0MII/mcbot/main/install.sh | sudo bash
 
-<span class="c-dim"># start the panel on port 80</span>
-npm start</code></pre>
+<span class="c-dim"># then open</span>
+http://localhost/</code></pre>
         </div>
       </div>
     </section>
