@@ -27,12 +27,13 @@ jobs:
       - name: Publish docs/ to gh-pages
         run: |
           cd src
+          cp -r docs "$RUNNER_TEMP/docs"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout --orphan gh-pages
           git rm -rf --cached . >/dev/null 2>&1 || true
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          cp -r docs/. .
+          cp -r "$RUNNER_TEMP/docs/." .
           touch .nojekyll
           git add -A
           git commit -m "Deploy project page" || echo "nothing to commit"
