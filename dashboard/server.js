@@ -75,7 +75,11 @@ let gateNextAt = 0;
 let gateBlockedUntil = 0;
 function takeConnectSlot() {
   const t = Date.now();
-  const at = Math.max(t, gateNextAt, gateBlockedUntil);
+  // A burst of retries from a failing provider must never push the spacing
+  // gate hours into the future and wedge every bot in "waiting for a slot".
+  // Real server-imposed blocks (gateBlockedUntil) are still respected.
+  const spacing = Math.min(gateNextAt, t + 20000);
+  const at = Math.max(t, spacing, gateBlockedUntil);
   gateNextAt = at + CONNECT_GAP_MS + Math.floor(Math.random() * 1100);
   return at - t;
 }
@@ -741,6 +745,19 @@ class ManagedBot {
       proxyPool.release(this.id);
       const why = clean(err && err.message || err, 80);
       this._proxyTries++;
+      // Webshare answers 402 when the account bandwidth is exhausted. Retrying
+      // every few seconds only spams logs — park the fleet with one clear
+      // status until the plan is renewed or data/webshare.json is updated.
+      if (/CONNECT 402|bandwidth limit|payment required/i.test(why)) {
+        this._proxyTries = 0;
+        if (!this._webshareWarnAt || now() - this._webshareWarnAt > 10 * 60 * 1000) {
+          this._webshareWarnAt = now();
+          this.addLog('err', 'Webshare proxy returned HTTP 402 — bandwidth limit reached. Renew/upgrade the Webshare plan or update data/webshare.json; bots stay paused until then.');
+        }
+        this._scheduleReconnect(10 * 60 * 1000);
+        this.setStatus('reconnecting', 'Webshare limit reached — renewal needed');
+        return;
+      }
       // A rotating tunnel is retried even when the public pool is empty —
       // otherwise a fresh-IP route would be skipped on the first failure.
       if (this._proxyTries < 3 && px && (px.virtual || proxyPool.summary().total)) {
