@@ -157,7 +157,7 @@ h1 span { color: var(--green); }
 .about__facts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 26px; }
 .about__facts span { padding: 7px 11px; border: 1px solid var(--line); border-radius: 99px; background: rgba(255,255,255,.02); font: 500 10px var(--mono); color: var(--muted); }
 .about__facts b { margin-right: 4px; color: var(--mint); font-weight: 600; }
-.about__anim { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.about__anim { display: grid; grid-template-columns: 1fr; gap: 14px; }
 .about__frame { margin: 0; padding: 8px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.025); }
 .about__frame img { display: block; width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 9px; background: #060509; }
 .about__frame figcaption { padding: 10px 4px 4px; color: var(--muted); font-size: 11.5px; }
