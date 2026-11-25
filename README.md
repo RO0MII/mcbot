@@ -1,7 +1,6 @@
-# 🤖 MCBot — Minecraft Console Bot
+# 🤖 MCBot — Minecraft Fleet Control
 
-A lightweight, interactive **Minecraft bot** for **version 1.20.1**, built on [Mineflayer](https://github.com/PrismarineJS/mineflayer).
-It connects to any server, shows live in-game chat right in your terminal, and lets you chat or run commands — all from a clean, colorful console.
+A self-hosted control panel for a fleet of Minecraft bots on **1.21.11**, built on [Mineflayer](https://github.com/PrismarineJS/mineflayer). Every bot gets its own proxy IP, joins the server, auto-logins, goes to the AFK arena and stays there — while you watch chat, vitals, inventories, proxies and scoreboard live in one dark panel.
 
 ```
   ███╗   ███╗ ██████╗██████╗  ██████╗ ████████╗
@@ -14,152 +13,137 @@ It connects to any server, shows live in-game chat right in your terminal, and l
 
 ---
 
-## ✨ Features
+## 🎬 See the panel
 
-- **Interactive login** — prompts for player name and server IP at startup.
-- **Live chat console** — see server chat in your terminal and type to chat back.
-- **Bot commands (`!`)** — local control commands like `!afk`, `!follow`, `!pos` (handled in the console, **never sent to the server**).
-- **Run server commands** — start a message with `/` to send a Minecraft command.
-- **Anti-AFK** — `!afk on` makes the bot move slightly so it's never kicked for being idle.
-- **Auto-respawn** — the bot respawns by itself when it dies.
-- **Follow players** — `!follow <name>` walks the bot to a player using pathfinding.
-- **Auto-reconnect** — keeps retrying while the server boots (great for [Aternos](https://aternos.org/)).
-- **Join watchdog** — gives up and retries cleanly if a join hangs (default 30s).
-- **Fast first join** — version is pinned to `1.20.1` to skip the auto-detect ping.
-- **Clean output** — network hiccups are shown as friendly status lines, not ugly stack traces.
-- **Offline (cracked) servers** by default — switch to `microsoft` auth for premium servers.
+An 18-second walkthrough of the live panel — login, 15-bot overview, one bot's detail page, proxy pool, servers and scoreboard.
 
----
+[![MCBot Control demo](docs/screenshots/02-overview.png)](docs/screenshots/panel-demo.mp4)
 
-## 📦 Requirements
+**Watch the demo video:** [panel-demo.mp4](docs/screenshots/panel-demo.mp4) (1280×720, H.264)
 
-- [Node.js](https://nodejs.org/) **v16+** (v18+ recommended)
-- A Minecraft server running **1.20.1**
+| Login | Fleet overview | Bot detail |
+|:---:|:---:|:---:|
+| [![Login](docs/screenshots/01-login.png)](docs/screenshots/01-login.png) | [![Overview](docs/screenshots/02-overview.png)](docs/screenshots/02-overview.png) | [![Bot detail](docs/screenshots/03-bot-detail.png)](docs/screenshots/03-bot-detail.png) |
+
+| Proxy pool | Servers | Scoreboard |
+|:---:|:---:|:---:|
+| [![Proxies](docs/screenshots/04-proxies.png)](docs/screenshots/04-proxies.png) | [![Servers](docs/screenshots/05-servers.png)](docs/screenshots/05-servers.png) | [![Scoreboard](docs/screenshots/06-scoreboard.png)](docs/screenshots/06-scoreboard.png) |
+
+The same gallery lives on the project page: **https://ro0mii.github.io/mcbot/**
 
 ---
 
-## 🚀 Installation
+## ✨ What it does
 
-**Panel only (fast — about 5s, no Discord/CLI deps):**
+- **One bot per IP** — sticky proxy assignment keyed by real host, so two ports on the same box never collide. `collisions 0`, `uniqueIps = fleet size`.
+- **Proxy-only egress** — no direct fallback: if there is no usable route, the bot waits rather than exposing the host IP.
+- **Lifetime uptime filtering** — routes are ranked `good → trial → curated → asian → rest` by cumulative uptime, not by a single lucky session. Dead routes are pruned; the live pool is capped at **400 routes / 200 discovery candidates**.
+- **Server-error-aware routing** — Velocity/auth hiccups (`internal error`, `unable to connect to auth`, `disconnect.timeout`) keep the proven route and rejoin after ~30s instead of burning good IPs on untested ones.
+- **Temporary ban handling** — the stated duration is parsed (`3 Days` → 72h) and the bot auto-restarts after it expires. Permanent bans are never retried automatically.
+- **One real AFK walk** — after spawn → `/login` → `/afk` → GUI slot 1 → teleport, each session does exactly **one 5–10 block walk** in a validated random direction. No mining, digging or placing.
+- **Live panel** — chat stream, per-bot console, real inventory, skin/body, health/food/XP, server pulse, sidebar scoreboard, group commands.
+- **Low footprint** — only the required mineflayer plugins, view distance 2, distant chunks dropped periodically.
+- **Auto-eat / auto-login / auto-reconnect** — new bots default to anti-AFK off, auto-eat on.
+
+---
+
+## 🚀 Quick start
+
+**Panel (fast install — about 5s, no Discord/CLI deps):**
 
 ```bash
 git clone https://github.com/RO0MII/mcbot.git
 cd mcbot
-npm run setup       # installs mineflayer only, rebuilds assets, starts port 80
-npm start           # panel already online — this just re-checks and prints the URL
+npm run setup       # installs runtime deps, rebuilds assets, starts port 80
+npm start           # panel is already up; this re-checks and prints the URL
 ```
 
-`npm run setup` is safe to run again: it skips the download when dependencies
-are already present. Use `sudo npm run setup` if your user cannot write to
-`/etc/systemd/system`.
+`npm run setup` is safe to run again — it skips existing downloads. Use `sudo` if your user cannot write to `/etc/systemd/system`.
 
-**Full CLI + Discord bridge:**
+Open `http://localhost/` (or the host's IP) and sign in with the password set in `DASHBOARD_PASSWORD`.
 
 ```bash
-npm install         # everything, including discord.js
-npm run bot         # terminal-only bot
+npm run dashboard   # foreground, no systemd
+npm run bot         # original terminal-only bot
 npm run discord     # Discord bridge
+npm run start:all   # terminal bot + Discord bridge
 ```
+
+> Set `DASHBOARD_PASSWORD` before exposing port 80 to the internet. Runtime state (`dashboard/data/` — bot configs, caches, proxy pool) is **git-ignored**; no credentials are committed.
 
 ---
 
-## 🖥️ Web dashboard
+## 🖥️ Panel guide
 
-`npm start` brings up **MCBot Control** on **port 80** — a self-hosted panel for
-every bot: live chat, real inventories, player skins, auto-login, auto-reconnect,
-auto-eat, `/afk` slot clicking and group-wide commands.
+| View | What you get |
+|---|---|
+| **Overview** | Fleet cards with status, egress IP, uptime, players, vitals, inventory strip and last log line. Filter chips + live search. |
+| **Bot detail** | Full console (type server commands), inventory, player state, scoreboard and per-bot actions. |
+| **Servers** | Bots grouped by endpoint, with player counts counted once per server. |
+| **Scoreboard** | Highest sidebar stat per bot plus every live sidebar. |
+| **Proxies** | Live SOCKS routes, health sweep, proven routes, pinned bots and cooldowns. |
 
-```bash
-npm start          # panel on http://localhost/
-npm run bot        # terminal-only bot (the original CLI)
-npm run dashboard  # run the panel in the foreground (no systemd)
-```
-
-Set `DASHBOARD_PASSWORD` before exposing it to the internet. Runtime data
-(bot configs, icon/skin caches) stays in `dashboard/data/` and is git-ignored.
-
-Bots use a lightweight mineflayer profile: only the plugins needed for login,
-chat, inventory, vitals, scoreboard and movement are loaded, view distance is
-capped at 2, and distant chunks are dropped every 30s. This keeps RAM and CPU
-low when running a large fleet.
-
-Project page: **https://ro0mii.github.io/mcbot/**
+Group commands are typed once and fan out to every online bot in the group; offline bots are skipped and named.
 
 ---
 
-## ▶️ Usage (terminal bot)
+## 🌐 Proxy routing rules
+
+- Assignments are pinned per bot and keyed by **IP**, not `host:port`.
+- A route is retired only after repeated failures: a live-session drop escalates **10 min → 30 min → retire on the third**.
+- Handshake failures get a short cooldown; proven routes survive transient server errors.
+- A `"This player is already online"` kick waits out the ghost session (~45s) instead of cycling IPs.
+- Permanent bans stop the bot until manually cleared. Temporary bans show the countdown and auto-rejoin.
+- Server staff rules: max 10 alts, one bot per IP, permanent bans cannot be unbanned. Appeals: `https://discord.gg/sgrcFUdjXU`.
+
+Tests: `cd dashboard && node --test test/*.test.js` — routing, uptime tiers, walking and ban parsing are covered (47 tests).
+
+---
+
+## 🕹️ Original terminal bot (legacy)
+
+`index.js` is the original single-bot CLI, pinned to **1.20.1**.
 
 ```bash
 npm run bot
-# or
-node index.js
 ```
 
-You'll be asked for:
+It prompts for a player name and server IP (`host` or `host:port`, Enter = `localhost:25565`). Type plain text for chat, `/` for a server command, `!` for a local bot command.
 
-1. **Player name** — the username the bot joins with.
-2. **Server IP** — `host` or `host:port`. Press **Enter** to use the default (`localhost:25565`).
+| Command | Description |
+|---|---|
+| `!help` | List bot commands |
+| `!afk on` / `!afk off` | Toggle anti-AFK movement |
+| `!pos` | Current coordinates |
+| `!health` | Health and hunger |
+| `!players` | Online players |
+| `!follow <name>` | Pathfind to a player |
+| `!stop` | Stop following |
+| `!quit` | Disconnect and exit |
 
-Once connected, anything you type is routed by its first character:
+Auto-respawn is always on. `quit` / `exit` / **Ctrl+C** exits the CLI.
 
-| You type            | Goes to            | Example                  |
-| ------------------- | ------------------ | ------------------------ |
-| Plain text          | Server chat        | `hello everyone`         |
-| `/` prefix          | Server command     | `/gamemode creative`     |
-| `!` prefix          | **Bot command** (local, never sent to the server) | `!afk on` |
+**Configuration** — settings at the top of [`index.js`](index.js):
 
----
+| Setting | Default | Description |
+|---|---|---|
+| `DEFAULT_IP` | `localhost` | IP used when you press Enter |
+| `DEFAULT_PORT` | `25565` | Default port |
+| `VERSION` | `1.20.1` | Pinned version; `false` auto-detects |
+| `AUTO_RECONNECT` | `true` | Retry while the server boots |
+| `RECONNECT_DELAY` | `5000` | ms between retries |
+| `JOIN_TIMEOUT` | `30000` | ms before a stalled join is retried |
 
-## 🤖 Bot Commands
-
-These start with `!` and are handled by the bot in your console — they are **never sent to server chat**.
-
-| Command            | Description                                         |
-| ------------------ | --------------------------------------------------- |
-| `!help`            | Show the list of bot commands                       |
-| `!afk on` / `!afk off` | Toggle anti-AFK movement (swing / look / jump)  |
-| `!pos`             | Show the bot's current coordinates                  |
-| `!health`          | Show the bot's health and hunger                    |
-| `!players`         | List players currently online                       |
-| `!follow <name>`   | Follow a player (uses pathfinding)                  |
-| `!stop`            | Stop following                                      |
-| `!quit`            | Disconnect and exit                                 |
-
-> 💀 **Auto-respawn:** when the bot dies it respawns automatically — no command needed.
-
-You can also type `quit` / `exit` (without `!`) or press **Ctrl+C** to exit at any time.
+Offline (`auth: 'offline'`) is the default; switch to `auth: 'microsoft'` inside `connect()` for premium servers.
 
 ---
 
-## ⚙️ Configuration
+## 🛠️ Tech stack
 
-Edit the settings at the top of [`index.js`](index.js):
-
-| Setting           | Default       | Description                                                        |
-| ----------------- | ------------- | ----------------------------------------------------------------- |
-| `DEFAULT_IP`      | `localhost`   | Used when you press Enter on the IP prompt.                        |
-| `DEFAULT_PORT`    | `25565`       | Default Minecraft port.                                            |
-| `VERSION`         | `1.20.1`      | Pinned version. Set to `false` to auto-detect the server version. |
-| `AUTO_RECONNECT`  | `true`        | Keep retrying while the server boots.                             |
-| `RECONNECT_DELAY` | `5000`        | Milliseconds between reconnect attempts.                           |
-| `JOIN_TIMEOUT`    | `30000`       | Milliseconds to wait for a join before retrying.                  |
-
-### Premium (Microsoft) accounts
-
-By default the bot uses `auth: 'offline'` for cracked/offline servers.
-For premium servers, open `index.js` and change the auth option inside `connect()`:
-
-```js
-auth: 'microsoft',
-```
-
----
-
-## 🛠️ Tech Stack
-
-- [Node.js](https://nodejs.org/)
+- [Node.js](https://nodejs.org/) 18+
 - [Mineflayer](https://github.com/PrismarineJS/mineflayer) `^4.20.1`
-- [mineflayer-pathfinder](https://github.com/PrismarineJS/mineflayer-pathfinder) `^2.4.5` (for `!follow`)
+- [mineflayer-pathfinder](https://github.com/PrismarineJS/mineflayer-pathfinder) `^2.4.5`
+- Vanilla HTML/CSS/JS panel with Server-Sent Events — no frontend build step
 
 ---
 

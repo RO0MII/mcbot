@@ -28,6 +28,7 @@
     </a>
     <nav class="nav__links" aria-label="Sections">
       <a href="#live">Live</a>
+      <a href="#screens">Screenshots</a>
       <a href="#group">Groups</a>
       <a href="#start">Start</a>
     </nav>
@@ -144,6 +145,35 @@
             <div class="row__text"><h3>Stays online</h3><p>Auto-login, auto-reconnect and a socket watchdog. A dead session is noticed and rebuilt.</p></div>
             <div class="row__demo statusdemo" aria-hidden="true"><i></i> live <span>·</span> last event 2s ago <span>·</span> 4/4 online</div>
           </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="screens" id="screens">
+      <div class="wrap">
+        <header class="head screens__head">
+          <div>
+            <p class="label">the real panel</p>
+            <h2>The actual thing,<br />not a mockup.</h2>
+          </div>
+          <p>Six live captures from the running dashboard — a 15-bot fleet, per-bot console, proxy egress and sidebar scores.</p>
+        </header>
+
+        <div class="screens__tour">
+          <video controls playsinline preload="metadata" poster="screenshots/02-overview.png">
+            <source src="screenshots/panel-demo.mp4" type="video/mp4" />
+            Your browser does not support MP4. <a href="screenshots/panel-demo.mp4">Download the demo</a>.
+          </video>
+          <p class="screens__caption"><span class="label">18-second tour</span> sign in → fleet → bot → proxies → servers → scoreboard</p>
+        </div>
+
+        <div class="gallery">
+          <a class="shot" href="screenshots/01-login.png" target="_blank" rel="noopener"><img src="screenshots/01-login.png" alt="MCBot Control sign-in screen" loading="lazy" /><span><b>01</b> Sign in</span></a>
+          <a class="shot" href="screenshots/02-overview.png" target="_blank" rel="noopener"><img src="screenshots/02-overview.png" alt="Fleet overview with all bots online" loading="lazy" /><span><b>02</b> Fleet overview</span></a>
+          <a class="shot" href="screenshots/03-bot-detail.png" target="_blank" rel="noopener"><img src="screenshots/03-bot-detail.png" alt="One bot's live console and inventory" loading="lazy" /><span><b>03</b> Bot detail</span></a>
+          <a class="shot" href="screenshots/04-proxies.png" target="_blank" rel="noopener"><img src="screenshots/04-proxies.png" alt="Proxy pool health and pinned routes" loading="lazy" /><span><b>04</b> Proxy pool</span></a>
+          <a class="shot" href="screenshots/05-servers.png" target="_blank" rel="noopener"><img src="screenshots/05-servers.png" alt="Bots grouped by server" loading="lazy" /><span><b>05</b> Servers</span></a>
+          <a class="shot" href="screenshots/06-scoreboard.png" target="_blank" rel="noopener"><img src="screenshots/06-scoreboard.png" alt="Live sidebar scoreboard ranking" loading="lazy" /><span><b>06</b> Scoreboard</span></a>
         </div>
       </div>
     </section>
