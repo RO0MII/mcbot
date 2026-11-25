@@ -1,25 +1,61 @@
-# 🤖 MCBot — Minecraft Fleet Control
+<div align="center">
 
-A self-hosted control panel for a fleet of Minecraft bots on **1.21.11**, built on [Mineflayer](https://github.com/PrismarineJS/mineflayer). Every bot gets its own proxy IP, joins the server, auto-logins, goes to the AFK arena and stays there — while you watch chat, vitals, inventories, proxies and scoreboard live in one dark panel.
+# MCBot — Fleet Control
 
-```
-  ███╗   ███╗ ██████╗██████╗  ██████╗ ████████╗
-  ████╗ ████║██╔════╝██╔══██╗██╔═══██╗╚══██╔══╝
-  ██╔████╔██║██║     ██████╔╝██║   ██║   ██║
-  ██║╚██╔╝██║██║     ██╔══██╗██║   ██║   ██║
-  ██║ ╚═╝ ██║╚██████╗██████╔╝╚██████╔╝   ██║
-  ╚═╝     ╚═╝ ╚═════╝╚═════╝  ╚═════╝    ╚═╝
-```
+**One panel. Fifteen bots. Fifteen proxy IPs. Zero collisions.**
+
+A self-hosted control room for Minecraft **1.21.11** bots, built on [Mineflayer](https://github.com/PrismarineJS/mineflayer). Every bot joins through its own proxy, logs in, goes to the AFK arena and stays there — while you watch chat, vitals, inventories, routes and scoreboard in one dark panel.
+
+[![Live site](https://img.shields.io/badge/project%20page-ro0mii.github.io%2Fmcbot-2fe08f?style=for-the-badge)](https://ro0mii.github.io/mcbot/)
+[![Fleet](https://img.shields.io/badge/fleet-15%2F15%20online-2fe08f?style=for-the-badge)](#about)
+[![Tests](https://img.shields.io/badge/tests-47%20passing-55c9f5?style=for-the-badge)](#proxy-routing)
+[![License](https://img.shields.io/badge/license-MIT-8b6cff?style=for-the-badge)](#license)
+
+</div>
 
 ---
 
-## 🎬 See the panel
+## About
 
-An 18-second walkthrough of the live panel — login, 15-bot overview, one bot's detail page, proxy pool, servers and scoreboard.
+MCBot started as a single terminal bot and grew into a small operations desk for a whole fleet. The problem it solves is simple to say and fiddly to do: **keep many Minecraft accounts online at once without ever exposing the host IP, and without two of them sharing an exit address.**
+
+Each bot is assigned one pinned proxy route, keyed by the real host IP (so two ports on the same box count as the same address). It joins the server, sends `/login`, runs `/afk`, clicks GUI slot 1, teleports to the arena and performs **one short random-direction walk** per session. No mining, no digging, no placing — just enough motion to stay present.
+
+Everything the bot sees is streamed to the panel: chat, health, food, XP, full inventory with real item textures, player skins, scoreboard and the proxy route it is currently using. If a route dies, the bot is re-homed to a better one **without ever falling back to a direct connection**.
+
+<div align="center">
+
+| | |
+|:---:|:---:|
+| <img src="docs/screenshots/cube-3d.gif" alt="Rotating 3D MCBot cube" width="420" /> | <img src="docs/screenshots/fleet-orbit.gif" alt="15 bots orbiting one control cube" width="420" /> |
+| **One control surface** | **One IP per bot** |
+
+</div>
+
+> **In one line:** a quiet, self-hosted room where every bot has its own door.
+
+---
+
+## At a glance
+
+| | |
+|---|---|
+| Server | `mc.hungrybirds.org:25565` · Minecraft **1.21.11** |
+| Fleet | 15 bots, all in the AFK arena |
+| Routing | Proxy-only, sticky by IP · `collisions 0` · `uniqueIps 15` |
+| Uptime | Lifetime-based route ranking, unlimited sessions |
+| Panel | Port 80, live SSE, no frontend build step |
+| Stack | Node.js 18+ · Mineflayer 4 · vanilla HTML/CSS/JS |
+
+---
+
+## See the panel
+
+An 18-second walkthrough of the real dashboard — login, 15-bot overview, one bot's detail page, proxy pool, servers and scoreboard.
 
 [![MCBot Control demo](docs/screenshots/02-overview.png)](docs/screenshots/panel-demo.mp4)
 
-**Watch the demo video:** [panel-demo.mp4](docs/screenshots/panel-demo.mp4) (1280×720, H.264)
+**Watch:** [panel-demo.mp4](docs/screenshots/panel-demo.mp4) · **Live page:** [ro0mii.github.io/mcbot](https://ro0mii.github.io/mcbot/)
 
 | Login | Fleet overview | Bot detail |
 |:---:|:---:|:---:|
@@ -29,11 +65,9 @@ An 18-second walkthrough of the live panel — login, 15-bot overview, one bot's
 |:---:|:---:|:---:|
 | [![Proxies](docs/screenshots/04-proxies.png)](docs/screenshots/04-proxies.png) | [![Servers](docs/screenshots/05-servers.png)](docs/screenshots/05-servers.png) | [![Scoreboard](docs/screenshots/06-scoreboard.png)](docs/screenshots/06-scoreboard.png) |
 
-The same gallery lives on the project page: **https://ro0mii.github.io/mcbot/**
-
 ---
 
-## ✨ What it does
+## What it does
 
 - **One bot per IP** — sticky proxy assignment keyed by real host, so two ports on the same box never collide. `collisions 0`, `uniqueIps = fleet size`.
 - **Proxy-only egress** — no direct fallback: if there is no usable route, the bot waits rather than exposing the host IP.
@@ -47,7 +81,7 @@ The same gallery lives on the project page: **https://ro0mii.github.io/mcbot/**
 
 ---
 
-## 🚀 Quick start
+## Quick start
 
 **Panel (fast install — about 5s, no Discord/CLI deps):**
 
@@ -71,9 +105,11 @@ npm run start:all   # terminal bot + Discord bridge
 
 > Set `DASHBOARD_PASSWORD` before exposing port 80 to the internet. Runtime state (`dashboard/data/` — bot configs, caches, proxy pool) is **git-ignored**; no credentials are committed.
 
+New bots default to: anti-AFK **off**, auto-eat **on**, auto-login password `Sandun123`, dashboard password `Sandun123`.
+
 ---
 
-## 🖥️ Panel guide
+## Panel guide
 
 | View | What you get |
 |---|---|
@@ -87,7 +123,7 @@ Group commands are typed once and fan out to every online bot in the group; offl
 
 ---
 
-## 🌐 Proxy routing rules
+## Proxy routing
 
 - Assignments are pinned per bot and keyed by **IP**, not `host:port`.
 - A route is retired only after repeated failures: a live-session drop escalates **10 min → 30 min → retire on the third**.
@@ -96,11 +132,11 @@ Group commands are typed once and fan out to every online bot in the group; offl
 - Permanent bans stop the bot until manually cleared. Temporary bans show the countdown and auto-rejoin.
 - Server staff rules: max 10 alts, one bot per IP, permanent bans cannot be unbanned. Appeals: `https://discord.gg/sgrcFUdjXU`.
 
-Tests: `cd dashboard && node --test test/*.test.js` — routing, uptime tiers, walking and ban parsing are covered (47 tests).
+Tests: `cd dashboard && node --test test/*.test.js` — routing, uptime tiers, walking and ban parsing are covered (**47 tests**).
 
 ---
 
-## 🕹️ Original terminal bot (legacy)
+## Original terminal bot (legacy)
 
 `index.js` is the original single-bot CLI, pinned to **1.20.1**.
 
@@ -138,7 +174,7 @@ Offline (`auth: 'offline'`) is the default; switch to `auth: 'microsoft'` inside
 
 ---
 
-## 🛠️ Tech stack
+## Tech stack
 
 - [Node.js](https://nodejs.org/) 18+
 - [Mineflayer](https://github.com/PrismarineJS/mineflayer) `^4.20.1`
@@ -147,6 +183,6 @@ Offline (`auth: 'offline'`) is the default; switch to `auth: 'microsoft'` inside
 
 ---
 
-## 📄 License
+## License
 
 MIT — free to use, modify, and share.
