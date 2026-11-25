@@ -7,37 +7,82 @@
  *    server the bots use, and keeps the ones that answer fast.
  *  · Hands each bot a sticky proxy (same IP across reconnects) and never puts
  *    more than `maxPerIp` bots behind one IP.
- *  · Anything that fails twice is dropped and its bots are re-homed.
+ *  · A 3-minute health sweep probes routes in the background. Successful
+ *    routes earn weight; timeouts/failures earn a cooldown and are skipped in
+ *    later sweeps instead of being retried over and over. After repeated
+ *    failures a route is retired from rotation entirely.
  *
- * Everything degrades safely: if no proxy is alive, callers fall back to a
- * direct connection so bots always come back online.
+ * There is no direct fallback: if no proxy is alive, bots wait for a route.
  */
 
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { recordSession, uptimeTier, uptimeSummary } = require('./proxy-uptime');
+
+// spys.one sits behind a Cloudflare challenge, so use ProxyScrape's country
+// feeds instead — same idea (Asian routes), machine-readable and free.
+const ASIA_COUNTRIES = ['JP', 'HK', 'SG', 'KR', 'TW', 'TH', 'MY', 'ID', 'IN', 'VN', 'PH'];
 
 const SOURCES = [
-  'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=ipport&format=text',
-  'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt',
-  'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt',
-  'https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt',
-  'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt',
-  'https://openproxylist.xyz/socks5.txt',
-];
+  // protocolipport keeps the scheme on each line, so one feed supplies both
+  // SOCKS5 and HTTP CONNECT routes (socks4 is ignored — this client cannot dial it).
+  { url: 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text' },
+  { url: 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt' },
+  { url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt' },
+  { url: 'https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt' },
+  { url: 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt' },
+  { url: 'https://openproxylist.xyz/socks5.txt' },
+].concat(ASIA_COUNTRIES.map((country) => ({
+  url: `https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=${country}`,
+  region: 'asia',
+}))).concat([{
+  url: 'https://roundproxies.com/api/get-free-proxies/?limit=100&page=1&sort_by=lastChecked&sort_type=desc&country=SG',
+  region: 'asia',
+  parse: 'roundproxies',
+}]);
 
 const DEFAULTS = {
   enabled: true,
   maxPerIp: 1,
-  validateTimeout: 4500,
-  validateConcurrency: 50,
-  maxCandidates: 700,
+  validateTimeout: 2500,
+  validateConcurrency: 60,
+  maxCandidates: 200,
+  maxPool: 400,                // hard cap on live routes; no endless growth
   refreshMs: 12 * 60 * 1000,   // full re-discover
   pruneMs: 4 * 60 * 1000,      // re-check what we already have
 };
 
+// Health model. A failed route is not retried on every sweep: it sits out the
+// next few sweeps, then gets one more chance. Repeated failures retire it.
+const HEALTH_CHECK_MS = 3 * 60 * 1000;
+const HEALTH_TIMEOUT_MS = 2500;
+const HEALTH_CONCURRENCY = 20;
+const HEALTH_BATCH = 160;
+const QUARANTINE_STEPS = [3, 15, 60].map((m) => m * 60 * 1000);
+const RETIRE_AFTER = QUARANTINE_STEPS.length + 1;
+const FAIL_DEDUPE_MS = 30000;
+// A live-session failure deserves a long cooldown, but one hiccup must not
+// permanently exile a route that has carried bots for hours. The third
+// confirmed game failure is enough evidence to retire it.
+const GAME_COOLDOWNS = [10, 30].map((m) => m * 60 * 1000);
+const GAME_RETIRE_AFTER = GAME_COOLDOWNS.length + 1;
+
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+
+function isQuarantined(p, now) {
+  return !!(p && (p.retired || (p.quarantineUntil || 0) > (now || Date.now())));
+}
+
+/** Low cost = good route. Every confirmed success makes a route cheaper to
+ *  pick; each consecutive failure makes it less attractive. */
+function healthCost(p) {
+  const latency = clamp(Number(p.latency) || 3000, 50, 6000);
+  const wins = clamp(Number(p.successes) || 0, 0, 30);
+  const streak = clamp(Number(p.failStreak) || 0, 0, 10);
+  return latency / (1 + wins * 0.6) + streak * 220;
+}
 
 /**
  * Local/private destinations must never be sent through a public proxy —
@@ -206,6 +251,7 @@ class ProxyPool {
     this.opts = Object.assign({}, DEFAULTS);
     this.file = null;
     this.target = { host: '', port: 25565 };
+    this.static = [];             // curated proxies from data/proxies.json (both protocols)
     this.alive = new Map();       // key -> { key, host, port, latency, okAt, fails, source }
     this.assignments = new Map(); // botId -> key
     this.names = new Map();       // botId -> bot name (display only)
@@ -214,6 +260,8 @@ class ProxyPool {
       enabled: false, host: 'p.webshare.io', port: 80, username: '', password: '',
     };
     this.lastRefresh = 0;
+    this.lastHealthCheck = 0;
+    this.healthBusy = false;
     this.refreshing = false;
     this.lastError = '';
     this.timers = [];
@@ -241,7 +289,7 @@ class ProxyPool {
     this.timers.forEach((t) => clearInterval(t));
     this.timers = [
       setInterval(() => this.refresh(false).catch(() => {}), this.opts.refreshMs),
-      setInterval(() => this._revalidateCached().catch(() => {}), this.opts.pruneMs),
+      setInterval(() => this.healthCheck().catch(() => {}), HEALTH_CHECK_MS),
     ];
     if (this.timers.forEach) this.timers.forEach((t) => { if (t.unref) t.unref(); });
   }
@@ -325,14 +373,42 @@ class ProxyPool {
         if (raw.assignments && typeof raw.assignments === 'object') {
           Object.keys(raw.assignments).forEach((k) => this.assignments.set(k, raw.assignments[k]));
         }
+        if (Array.isArray(raw.static)) {
+          this.static = raw.static.filter((p) => p && p.host && p.port).map((p) => ({
+            host: p.host, port: Number(p.port),
+            protocol: p.protocol === 'http' ? 'http' : 'socks5',
+            region: p.region || '',
+            username: p.username || undefined, password: p.password || undefined,
+          }));
+        }
         if (Array.isArray(raw.alive)) {
           raw.alive.forEach((p) => {
             if (!p || !p.host || !p.port) return;
             const key = p.host + ':' + p.port;
             this.alive.set(key, {
               key, host: p.host, port: Number(p.port),
+              protocol: p.protocol === 'http' ? 'http' : 'socks5',
+              region: p.region || '',
+              username: p.username || undefined, password: p.password || undefined,
               latency: Number(p.latency) || 999, okAt: Number(p.okAt) || 0,
-              fails: 0, source: p.source || 'cache', checked: false,
+              fails: Number(p.fails) || 0,
+              failStreak: Number(p.failStreak) || 0,
+              successes: Number(p.successes) || 0,
+              sessions: Number(p.sessions) || 0,
+              totalUptimeMs: Number(p.totalUptimeMs) || 0,
+              lifetimeUptimeMs: Number(p.lifetimeUptimeMs) || Number(p.totalUptimeMs) || 0,
+              bestUptimeMs: Number(p.bestUptimeMs) || 0,
+              shortSessions: Number(p.shortSessions) || 0,
+              longSessions: Number(p.longSessions) || 0,
+              recent: Array.isArray(p.recent)
+                ? p.recent.slice(-10).map((r) => ({ ms: Number(r && r.ms) || 0, at: Number(r && r.at) || 0 }))
+                : [],
+              checkedAt: Number(p.checkedAt) || 0,
+              quarantineUntil: Number(p.quarantineUntil) || 0,
+              retired: !!p.retired,
+              lastFail: Number(p.lastFail) || 0,
+              gameFailures: Number(p.gameFailures) || 0,
+              source: p.source || 'cache', checked: false,
             });
           });
         }
@@ -351,7 +427,19 @@ class ProxyPool {
         const alive = Array.from(this.alive.values())
           .sort((a, b) => a.latency - b.latency)
           .slice(0, 400)
-          .map((p) => ({ host: p.host, port: p.port, latency: p.latency, okAt: p.okAt, source: p.source }));
+          .map((p) => ({
+            host: p.host, port: p.port, protocol: p.protocol, region: p.region || '',
+            latency: p.latency, okAt: p.okAt, source: p.source,
+            fails: p.fails || 0, failStreak: p.failStreak || 0, successes: p.successes || 0,
+            sessions: p.sessions || 0, totalUptimeMs: p.totalUptimeMs || 0,
+            lifetimeUptimeMs: p.lifetimeUptimeMs || p.totalUptimeMs || 0,
+            bestUptimeMs: p.bestUptimeMs || 0, shortSessions: p.shortSessions || 0,
+            longSessions: p.longSessions || 0,
+            recent: Array.isArray(p.recent) ? p.recent.slice(-10) : [],
+            checkedAt: p.checkedAt || 0, quarantineUntil: p.quarantineUntil || 0,
+            retired: !!p.retired, lastFail: p.lastFail || 0,
+            gameFailures: p.gameFailures || 0,
+          }));
         const assignments = {};
         this.assignments.forEach((v, k) => { assignments[k] = v; });
         const tmp = this.file + '.tmp';
@@ -359,6 +447,7 @@ class ProxyPool {
           enabled: this.opts.enabled,
           maxPerIp: this.opts.maxPerIp,
           lastRefresh: this.lastRefresh,
+          static: this.static,
           alive,
           assignments,
           savedAt: Date.now(),
@@ -393,15 +482,23 @@ class ProxyPool {
     });
   }
 
-  _parseLine(line) {
+  _parseLine(line, region) {
     let s = String(line || '').trim();
     if (!s || s.startsWith('#')) return null;
-    s = s.replace(/^socks5h?:\/\//i, '').replace(/^https?:\/\//i, '');
+    let protocol = 'socks5';
+    const scheme = s.match(/^([a-z][a-z0-9+.-]*):\/\//i);
+    if (scheme) {
+      const p = scheme[1].toLowerCase();
+      if (p === 'socks4' || p === 'socks4a') return null; // unsupported by this client
+      protocol = p.indexOf('http') === 0 ? 'http' : 'socks5';
+      s = s.slice(scheme[0].length);
+    }
     s = s.split(/[\s,;|]/)[0];
     let user = '', pass = '';
-    if (s.includes('@')) {
-      const [creds, rest] = s.split('@');
-      s = rest;
+    const credsAt = s.lastIndexOf('@');
+    if (credsAt > 0) {
+      const creds = s.slice(0, credsAt);
+      s = s.slice(credsAt + 1);
       const ci = creds.indexOf(':');
       if (ci > 0) { user = creds.slice(0, ci); pass = creds.slice(ci + 1); }
       else user = creds;
@@ -412,16 +509,32 @@ class ProxyPool {
     const port = Number(m[2]);
     if (!port || port > 65535) return null;
     if (!net.isIP(host)) return null; // skip hostnames: too slow to re-resolve
-    return { host, port, username: user || undefined, password: pass || undefined };
+    return { host, port, protocol, region: region || '', username: user || undefined, password: pass || undefined };
   }
 
   async _discover() {
-    const lists = await Promise.all(SOURCES.map((u) => this._fetch(u).catch(() => [])));
+    const lists = await Promise.all(SOURCES.map(async (s) => {
+      const lines = await this._fetch(s.url).catch(() => []);
+      if (s.parse !== 'roundproxies' || !lines.length) return lines;
+      try {
+        const j = JSON.parse(lines.join(''));
+        return (j.data || [])
+          .filter((x) => x.ip && x.port && (x.protocols || []).some((p) => p !== 'socks4'))
+          .sort((a, b) => (b.upTime || 0) - (a.upTime || 0) || (a.latency || 99999) - (b.latency || 99999))
+          .map((x) => {
+            const proto = (x.protocols || []).find((p) => p !== 'socks4');
+            return `${proto.indexOf('socks') === 0 ? 'socks5' : 'http'}://${x.ip}:${x.port}`;
+          });
+      } catch (_) { return []; }
+    }));
     const seen = new Set();
     const out = [];
-    lists.forEach((lines) => {
-      lines.forEach((line) => {
-        const p = this._parseLine(line);
+    lists.forEach((lines, i) => {
+      const region = SOURCES[i].region || '';
+      // Keep one feed from swallowing the validation budget.
+      const cap = region === 'asia' ? 40 : 120;
+      lines.slice(0, cap).forEach((line) => {
+        const p = this._parseLine(line, region);
         if (!p) return;
         const key = p.host + ':' + p.port;
         if (seen.has(key)) return;
@@ -448,12 +561,12 @@ class ProxyPool {
     const workers = new Array(Math.min(this.opts.validateConcurrency, list.length || 1)).fill(0).map(async () => {
       while (idx < list.length) {
         const p = list[idx++];
-        const t0 = Date.now();
         try {
-          const sock = await socks5Connect(p, this.target.host, this.target.port, this.opts.validateTimeout);
-          const latency = Date.now() - t0;
-          try { sock.destroy(); } catch (_) {}
-          results.push({ ...p, latency, okAt: Date.now(), source: source || p.source || 'list' });
+          // Endpoint-only check: no game-server tunnel from the validator.
+          const latency = await this.probe(p, this.opts.validateTimeout);
+          // Keep a curated proxy's 'user' tag so pick() can prioritise it;
+          // only untagged discoveries get the feed's source name.
+          results.push({ ...p, latency, okAt: Date.now(), source: p.source || source || 'list' });
         } catch (_) { /* dead */ }
       }
     });
@@ -472,12 +585,17 @@ class ProxyPool {
     this.refreshing = true;
     const t0 = Date.now();
     try {
-      const candidates = await this._discover();
+      const discovered = this.opts.enabled ? await this._discover() : [];
+      // Curated proxies from data/proxies.json are validated first and given
+      // priority by pick(); discovered routes are backup only.
+      const candidates = (this.static.length ? this.static.map((p) => ({ ...p, source: 'user' })) : [])
+        .concat(discovered);
       const fresh = await this._validate(candidates, 'live');
       fresh.forEach((p) => this._upsert(p, true));
       this.lastRefresh = Date.now();
       this.lastError = '';
-      this.log(`proxy pool: ${fresh.length}/${candidates.length} alive in ${((Date.now() - t0) / 1000).toFixed(1)}s (${this.alive.size} total)`);
+      const curated = fresh.filter((p) => p.source === 'user').length;
+      this.log(`proxy pool: ${fresh.length}/${candidates.length} alive (${curated} curated) in ${((Date.now() - t0) / 1000).toFixed(1)}s (${this.alive.size} total)`);
       this._pruneAssignments();
       this._save();
     } catch (e) {
@@ -491,21 +609,138 @@ class ProxyPool {
   async _revalidateCached() {
     if (this.webshareActive()) return;
     if (!this.alive.size || !this.target.host) return;
-    const list = Array.from(this.alive.values()).map((p) => ({ host: p.host, port: p.port, source: p.source }));
+    const list = Array.from(this.alive.values()).map((p) => ({
+      host: p.host, port: p.port, protocol: p.protocol,
+      username: p.username, password: p.password, source: p.source, region: p.region,
+    }));
     const ok = await this._validate(list, 'cached');
-    const nowKey = new Set(ok.map((p) => p.host + ':' + p.port));
-    // Anything that failed once keeps its slot until it fails twice.
-    list.forEach((p) => {
-      const key = p.host + ':' + p.port;
-      if (nowKey.has(key)) return;
-      const cur = this.alive.get(key);
-      if (!cur) return;
-      cur.fails = (cur.fails || 0) + 1;
-      if (cur.fails >= 2) this.alive.delete(key);
-    });
+    // Boot revalidation only refreshes latency. Scoring (success weight,
+    // cooldown, retirement) belongs to the 3-minute health sweep so a slow
+    // startup test cannot quarantine a route before the bots even connect.
     ok.forEach((p) => this._upsert(p, false));
     this._pruneAssignments();
     this._save();
+  }
+
+  /* ── rolling health sweep ─────────────────────────────────────────────── */
+  /** Every three minutes: probe idle routes, reward the ones that answer,
+   *  and park the ones that time out so later sweeps do not waste time on
+   *  them. Bot connect/spawn callbacks feed the same score. */
+  async healthCheck(force) {
+    if (!this.opts.enabled || !this.target.host || this.webshareActive()) return this.status();
+    if (this.healthBusy && !force) return this.status();
+    this.healthBusy = true;
+    const started = Date.now();
+    let okCount = 0;
+    let failCount = 0;
+    try {
+      const used = new Set(this.assignments.values());
+      const list = Array.from(this.alive.values())
+        .filter((p) => !used.has(p.key) && !isQuarantined(p, started))
+        .sort((a, b) => (a.checkedAt || a.okAt || 0) - (b.checkedAt || b.okAt || 0))
+        .slice(0, HEALTH_BATCH);
+      // Curated routes that were never validated get one chance too.
+      this.static.forEach((s) => {
+        if (list.length >= HEALTH_BATCH) return;
+        const key = s.host + ':' + s.port;
+        if (this.alive.has(key) || used.has(key)) return;
+        list.push({ ...s, ip: s.host, key, source: 'user' });
+      });
+      let idx = 0;
+      await Promise.all(new Array(Math.min(HEALTH_CONCURRENCY, Math.max(1, list.length))).fill(0).map(async () => {
+        while (idx < list.length) {
+          const p = list[idx++];
+          try {
+            // Endpoint probe only. Tunnel validation is left to real bot
+            // joins so the health sweep cannot disturb live game sessions.
+            const latency = await this.probe(p, HEALTH_TIMEOUT_MS);
+            this._healthOk(p, latency, true);
+            okCount++;
+          } catch (e) {
+            const msg = String((e && e.message) || e || '');
+            this._healthFail(p, /timeout|timed out|ETIMEDOUT/i.test(msg) ? 'timeout' : 'error');
+            failCount++;
+          }
+        }
+      }));
+      this.lastHealthCheck = Date.now();
+      this.log(`proxy health (endpoints): ${okCount} ok, ${failCount} failed in ${((this.lastHealthCheck - started) / 1000).toFixed(1)}s`);
+      this._pruneAssignments();
+      this._save();
+    } finally {
+      this.healthBusy = false;
+    }
+    return this.status();
+  }
+
+  _healthOk(proxy, latency, count) {
+    const key = (proxy && (proxy.ip || proxy.host)) + ':' + (proxy && proxy.port);
+    const p = this.alive.get(key);
+    if (!p) return;
+    const now = Date.now();
+    if (count && now - (p.okAt || 0) > 15000) {
+      p.successes = Math.min(60, (p.successes || 0) + 1);
+    }
+    p.fails = 0;
+    p.failStreak = 0;
+    p.quarantineUntil = 0;
+    // A retired route stays retired until an explicit reset. An endpoint can
+    // answer TCP while still killing live game sessions, so a successful probe
+    // must never resurrect it.
+    p.lastReason = '';
+    const sample = clamp(Number(latency) || 3000, 20, 12000);
+    p.latency = Math.round((Number(p.latency) || sample) * 0.65 + sample * 0.35);
+    p.checkedAt = now;
+    p.okAt = now;
+  }
+
+  _healthFail(proxy, reason) {
+    if (!proxy) return;
+    const key = (proxy.ip || proxy.host) + ':' + proxy.port;
+    let p = this.alive.get(key);
+    if (!p) {
+      p = {
+        key, host: proxy.ip || proxy.host, port: Number(proxy.port),
+        protocol: proxy.protocol === 'http' ? 'http' : 'socks5',
+        region: proxy.region || '', latency: Number(proxy.latency) || 999,
+        source: proxy.source || 'user', fails: 0, failStreak: 0, successes: 0,
+        checkedAt: 0, quarantineUntil: 0, retired: false, lastFail: 0,
+      };
+      this.alive.set(key, p);
+    }
+    const now = Date.now();
+    // One route can report the same failed attempt from the dial and from the
+    // handshake. Count it once, not twice.
+    if (now - (p.lastFail || 0) < FAIL_DEDUPE_MS) return;
+    p.lastFail = now;
+    p.checkedAt = now;
+    p.fails = (p.fails || 0) + 1;
+    p.failStreak = (p.failStreak || 0) + 1;
+    p.lastReason = reason || 'error';
+    if (p.failStreak >= RETIRE_AFTER) {
+      p.retired = true;
+      p.quarantineUntil = 0;
+      this.log(`proxy health: retired ${key} after ${p.failStreak} failures`);
+    } else {
+      const step = clamp(p.failStreak - 1, 0, QUARANTINE_STEPS.length - 1);
+      p.quarantineUntil = now + QUARANTINE_STEPS[step];
+    }
+    this._save();
+  }
+
+  resetHealth() {
+    this.alive.forEach((p) => {
+      p.fails = 0;
+      p.failStreak = 0;
+      p.successes = 0;
+      p.checkedAt = 0;
+      p.quarantineUntil = 0;
+      p.retired = false;
+      p.lastFail = 0;
+      p.lastReason = '';
+    });
+    this._save();
+    return this.status();
   }
 
   _upsert(p, isNew) {
@@ -516,10 +751,20 @@ class ProxyPool {
       cur.okAt = p.okAt || Date.now();
       cur.fails = 0;
       cur.checked = true;
+      if (p.protocol) cur.protocol = p.protocol;
+      if (p.region) cur.region = p.region;
+      if (p.username) cur.username = p.username;
+      if (p.password) cur.password = p.password;
       return cur;
     }
+    // Keep the live map small: discovery can find thousands of endpoints, but
+    // only a capped set is useful. Curated/user routes are always allowed in.
+    if (this.alive.size >= (Number(this.opts.maxPool) || 400) && p.source !== 'user') return null;
     const rec = {
       key, host: p.host, port: Number(p.port),
+      protocol: p.protocol === 'http' ? 'http' : 'socks5',
+      region: p.region || '',
+      username: p.username, password: p.password,
       latency: p.latency, okAt: p.okAt || Date.now(),
       fails: 0, source: p.source || 'list', checked: true,
     };
@@ -586,26 +831,81 @@ class ProxyPool {
         protocol: 'http', virtual: true, latency: 0,
       };
     }
+    const now = Date.now();
     const assigned = this.assignments.get(botId);
     if (assigned) {
       const p = this.alive.get(assigned);
-      if (p) return this._public(p);
+      // A retired/quarantined sticky route must not survive just because the
+      // bot still has an assignment. Otherwise the same dead IP is retried
+      // after every reconnect, which is the 4–6 minute disconnect loop.
+      if (p && !p.retired && !(p.quarantineUntil > now)) return this._public(p);
       this.assignments.delete(botId);
+      this._save();
     }
     if (!this.alive.size) return null;
     const perIp = this._ipCounts(botId);
     const candidates = Array.from(this.alive.values())
-      .filter((p) => (perIp.get(p.host) || 0) < this.opts.maxPerIp);
+      .filter((p) => !isQuarantined(p, now) && (perIp.get(p.host) || 0) < this.opts.maxPerIp);
     if (!candidates.length) return null;
-    // Spread, don't pack. With maxPerIp=1 every route starts at zero, so a
-    // latency sort would hand the SAME fastest IP to every bot. Prefer an
-    // unused address and choose randomly among them instead.
-    const free = candidates.filter((p) => !perIp.has(p.host));
-    const pool = free.length ? free : candidates;
-    const chosen = pool[Math.floor(Math.random() * pool.length)];
+    // The longest-lived routes win first: clean one-hour+ sessions, then
+    // recovering/trial routes, then curated bootstrap routes, then public
+    // Asian routes. Lifetime uptime breaks ties before latency, so a route
+    // that has stayed online for hours is preferred over a fast newcomer.
+    const tierRank = (p) => {
+      const tier = uptimeTier(p);
+      if (tier === 'good') return 0;
+      if (tier === 'trial') return 1;
+      if (p.source === 'user') return 2;
+      if (p.region === 'asia') return 3;
+      return 4;
+    };
+    const tiered = candidates.slice().sort((a, b) => tierRank(a) - tierRank(b)
+      || (b.totalUptimeMs || 0) - (a.totalUptimeMs || 0)
+      || healthCost(a) - healthCost(b));
+    const bestRank = tierRank(tiered[0]);
+    const tier = tiered.filter((p) => tierRank(p) === bestRank);
+    const free = tier.filter((p) => !perIp.has(p.host));
+    const pool = free.length ? free : tier;
+    const ranked = pool; // already tier-ranked, then lifetime-ranked
+    const best = ranked.slice(0, Math.min(12, ranked.length));
+    // Weighted random: a route with N confirmed wins is N+1 times as likely
+    // as an untested one, but no single fast route swallows the whole fleet.
+    const weights = best.map((p) => 1 + Math.min(20, p.successes || 0));
+    let roll = Math.random() * weights.reduce((a, b) => a + b, 0);
+    let chosen = best[best.length - 1];
+    for (let i = 0; i < best.length; i++) {
+      roll -= weights[i];
+      if (roll <= 0) { chosen = best[i]; break; }
+    }
     this.assignments.set(botId, chosen.key);
     this._save();
     return this._public(chosen);
+  }
+
+  /** Cheap liveness probe: open a TCP socket to the proxy endpoint only.
+   *  Never tunnel to the game server from background validation — hundreds of
+   *  tunnels in three minutes made Velocity drop active bot sessions. A real
+   *  bot join/spawn is the only proof a route can actually reach the server. */
+  probe(proxy, timeoutMs) {
+    const host = proxy && (proxy.ip || proxy.host);
+    const port = Number(proxy && proxy.port);
+    if (!host || !port) return Promise.reject(new Error('no proxy endpoint'));
+    return new Promise((resolve, reject) => {
+      const t0 = Date.now();
+      let done = false;
+      let sock = null;
+      const finish = (err, ms) => {
+        if (done) return;
+        done = true;
+        try { sock.setTimeout(0); sock.destroy(); } catch (_) {}
+        if (err) reject(err); else resolve(ms);
+      };
+      sock = net.connect({ host, port });
+      sock.setTimeout(timeoutMs || HEALTH_TIMEOUT_MS, () => finish(new Error('timeout')));
+      sock.once('connect', () => finish(null, Date.now() - t0));
+      sock.once('error', (e) => finish(e));
+      sock.once('close', () => finish(new Error('closed')));
+    });
   }
 
   /** Dial the game server through a proxy, resolving a ready socket. */
@@ -620,29 +920,109 @@ class ProxyPool {
 
   reportOk(proxy) {
     if (!proxy) return;
+    this._healthOk(proxy, proxy.latency, true);
+  }
+
+  /** Fold one completed live session into the route's uptime history. A
+   *  short session is a real disconnect, not a handshake failure: two of them
+   *  cool the route for ten minutes and three retire it permanently. */
+  reportSession(proxy, durationMs, reason) {
+    if (!proxy) return null;
     const key = (proxy.ip || proxy.host) + ':' + proxy.port;
     const p = this.alive.get(key);
-    if (p) { p.fails = 0; p.okAt = Date.now(); }
+    if (!p) return null;
+    recordSession(p, durationMs);
+    if (p.shortSessions === 2) {
+      p.quarantineUntil = Date.now() + 10 * 60 * 1000;
+      this.log(`proxy health: ${key} cooled down after two short sessions`);
+    } else if (p.shortSessions >= 3) {
+      p.retired = true;
+      p.quarantineUntil = 0;
+      this.log(`proxy health: retired ${key} after three short sessions`);
+    }
+    this._save();
+    return uptimeTier(p);
   }
 
   reportFailure(proxy) {
     if (!proxy) return;
-    const key = (proxy.ip || proxy.host) + ':' + proxy.port;
+    this._healthFail(proxy, 'handshake');
+  }
+
+  /** The route connected fine but the game server kept resetting the player
+   *  back to spawn. Cool it down instead of retiring it on a single walk: some
+   *  endpoints recover, but they must not be picked again immediately. */
+  reportWalkFailure(proxy) {
+    if (!proxy) return;
+    const key = `${proxy.ip || proxy.host}:${proxy.port}`;
     const p = this.alive.get(key);
     if (!p) return;
+    p.quarantineUntil = Date.now() + 10 * 60 * 1000;
+    p.failStreak = (p.failStreak || 0) + 1;
+    this._save();
+    this.log(`proxy health: ${key} cooled down after an AFK rubber-band`);
+  }
+
+  /** A route that kills an already-connected session is worse than one that
+   *  times out during setup, but a single Velocity hiccup is not proof the IP
+   *  is dead. Cool it down twice, then retire it on the third confirmed drop. */
+  reportGameFailure(proxy) {
+    if (!proxy) return;
+    const key = (proxy.ip || proxy.host) + ':' + proxy.port;
+    const p = this.alive.get(key);
+    if (!p || p.retired) return;
+    const now = Date.now();
+    p.gameFailures = (p.gameFailures || 0) + 1;
     p.fails = (p.fails || 0) + 1;
-    p.lastFail = Date.now();
-    if (p.fails >= 2) {
-      this.alive.delete(key);
-      this._pruneAssignments();
-      this.log(`proxy pool: dropped ${key} after ${p.fails} failures`);
+    p.failStreak = (p.failStreak || 0) + 1;
+    p.lastFail = now;
+    if (p.gameFailures >= GAME_RETIRE_AFTER) {
+      p.retired = true;
+      p.quarantineUntil = 0;
+      this.log(`proxy health: retired ${key} after ${p.gameFailures} live-session failures`);
+    } else {
+      p.quarantineUntil = now + GAME_COOLDOWNS[p.gameFailures - 1];
+      this.log(`proxy health: ${key} cooled down after live-session failure ${p.gameFailures}`);
     }
     this._save();
+  }
+
+  /** A route with real uptime evidence is worth another attempt: losing the
+   *  sticky assignment would let another bot take the proven IP while its
+   *  owner reconnects. Unproven routes are released so a bad IP is not retried. */
+  isProvenRoute(proxy) {
+    const key = proxy && ((proxy.ip || proxy.host) + ':' + proxy.port);
+    const p = key && this.alive.get(key);
+    if (!p || p.retired || p.quarantineUntil > Date.now()) return false;
+    const tier = uptimeTier(p);
+    return tier === 'good' || tier === 'trial'
+      || (Number(p.bestUptimeMs) || 0) >= 10 * 60 * 1000;
+  }
+
+  /** Called when a bot never reached spawn. Report the failure, but keep the
+   *  pin on a proven route so no other bot can steal that address. */
+  handleHandshakeFailure(botId, proxy) {
+    const proven = this.isProvenRoute(proxy);
+    this.reportFailure(proxy);
+    if (!proven) this.release(botId);
+    return proven;
   }
 
   release(botId) {
     if (!botId) return;
     this.assignments.delete(botId);
+    this._save();
+  }
+
+  /** Re-pin a bot to the proxy its live socket is actually using. Reshuffles
+   *  must not leave connected bots unpinned, or pick() can hand their IP to
+   *  another bot and break the one-bot-per-IP rule. */
+  hold(botId, proxy) {
+    if (!botId || !proxy) return;
+    const key = proxy.key || `${proxy.ip || proxy.host}:${proxy.port}`;
+    if (!String(key).startsWith('webshare:') && !this.alive.has(key)) return;
+    if (this.assignments.get(botId) === key) return;
+    this.assignments.set(botId, key);
     this._save();
   }
 
@@ -658,6 +1038,8 @@ class ProxyPool {
       ip: p.host,
       port: p.port,
       key: p.key,
+      protocol: p.protocol === 'http' ? 'http' : 'socks5',
+      region: p.region || '',
       latency: p.latency,
       username: p.username,
       password: p.password,
@@ -672,7 +1054,10 @@ class ProxyPool {
   }
 
   summary() {
-    return { enabled: this.opts.enabled, total: this.alive.size, assigned: this.assignments.size };
+    const now = Date.now();
+    let healthy = 0;
+    this.alive.forEach((p) => { if (!isQuarantined(p, now)) healthy++; });
+    return { enabled: this.opts.enabled, total: healthy, assigned: this.assignments.size };
   }
 
   status() {
@@ -690,18 +1075,50 @@ class ProxyPool {
       perIp.set(p.host, (perIp.get(p.host) || 0) + 1);
       if (perIp.get(p.host) > 1) collisions++;
     });
+    const now = Date.now();
+    let quarantined = 0;
+    let retired = 0;
+    let proven = 0;
+    const good = [];
     const proxies = Array.from(this.alive.values())
-      .sort((a, b) => a.latency - b.latency)
-      .map((p) => ({
-        ip: p.host,
-        port: p.port,
-        key: p.key,
-        latency: p.latency,
-        okAt: p.okAt,
-        fails: p.fails || 0,
-        source: p.source,
-        bots: botsByKey.get(p.key) || [],
-      }));
+      .sort((a, b) => healthCost(a) - healthCost(b))
+      .map((p) => {
+        if (p.retired) retired++;
+        else if ((p.quarantineUntil || 0) > now) quarantined++;
+        if ((p.successes || 0) > 0) proven++;
+        const uptime = uptimeSummary(p);
+        if (uptime.tier === 'good' && !isQuarantined(p, now)) {
+          good.push({
+            key: p.key,
+            ip: p.host,
+            port: p.port,
+            lifetimeUptimeSec: uptime.lifetimeUptimeSec,
+            bestUptimeSec: uptime.bestUptimeSec,
+            sessions: uptime.sessions,
+          });
+        }
+        return {
+          ip: p.host,
+          port: p.port,
+          key: p.key,
+          protocol: p.protocol || 'socks5',
+          region: p.region || '',
+          latency: p.latency,
+          okAt: p.okAt,
+          fails: p.fails || 0,
+          failStreak: p.failStreak || 0,
+          successes: p.successes || 0,
+          ...uptime,
+          checkedAt: p.checkedAt || 0,
+          quarantineUntil: p.quarantineUntil || 0,
+          retired: !!p.retired,
+          lastReason: p.lastReason || '',
+          score: Math.round(10000 / (1 + healthCost(p) / 100)),
+          source: p.source,
+          bots: botsByKey.get(p.key) || [],
+        };
+      });
+    good.sort((a, b) => b.lifetimeUptimeSec - a.lifetimeUptimeSec);
     return {
       enabled: this.opts.enabled,
       maxPerIp: this.opts.maxPerIp,
@@ -712,6 +1129,16 @@ class ProxyPool {
       refreshing: this.refreshing,
       lastRefresh: this.lastRefresh,
       nextRefresh: this.lastRefresh ? this.lastRefresh + this.opts.refreshMs : null,
+      health: {
+        intervalMs: HEALTH_CHECK_MS,
+        lastCheck: this.lastHealthCheck,
+        nextCheck: this.lastHealthCheck ? this.lastHealthCheck + HEALTH_CHECK_MS : null,
+        checking: this.healthBusy,
+        healthy: this.alive.size - quarantined - retired,
+        quarantined,
+        retired,
+        proven,
+      },
       target: this.target,
       lastError: this.lastError,
       sources: SOURCES.length,
@@ -723,6 +1150,7 @@ class ProxyPool {
         mode: 'rotating',
         bots: webshareBots,
       },
+      good,
       proxies,
     };
   }

@@ -63,6 +63,10 @@ function guardReconfigPackets(bot) {
   };
 }
 const proxyPool = require('./proxy-pool');
+const { classifyDisconnect, isTransientKick } = require('./route-outcome');
+const { parseBanDuration } = require('./ban-duration');
+const { runArenaWalk } = require('./arena-walker');
+const { Vec3 } = require('vec3');
 
 // Light bot profile: fewer plugins, fewer chunks, lower RAM/CPU per bot.
 const LIGHT_OPTIONS = require('./bot-options');
@@ -70,17 +74,17 @@ const LIGHT_OPTIONS = require('./bot-options');
 // Velocity rate-limits joins per IP ("Papyrus — You're connecting too quickly").
 // Ten bots retrying together therefore never get in. This gate spaces every
 // connection attempt across the whole fleet.
-const CONNECT_GAP_MS = 3200;
+const CONNECT_GAP_MS = 1500;
 let gateNextAt = 0;
 let gateBlockedUntil = 0;
 function takeConnectSlot() {
   const t = Date.now();
-  // A burst of retries from a failing provider must never push the spacing
-  // gate hours into the future and wedge every bot in "waiting for a slot".
-  // Real server-imposed blocks (gateBlockedUntil) are still respected.
+  // Every bot egresses from its own proxy IP, so a 3.2s global gap only made
+  // the whole fleet look offline for ~40s after a restart. Keep a short
+  // stagger for server politeness, but never push it far into the future.
   const spacing = Math.min(gateNextAt, t + 20000);
   const at = Math.max(t, spacing, gateBlockedUntil);
-  gateNextAt = at + CONNECT_GAP_MS + Math.floor(Math.random() * 1100);
+  gateNextAt = at + CONNECT_GAP_MS + Math.floor(Math.random() * 700);
   return at - t;
 }
 function blockConnectGate(ms) {
@@ -287,13 +291,54 @@ const VERIFY_PROMPT = /you are being verified|please do not move.*automatic|veri
 const OFFLINE_CODES = ['ECONNRESET', 'ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'EAI_AGAIN', 'EPIPE', 'ENETUNREACH'];
 
 // /afk → GUI slot 1 → 5..4..3..2..1 → AFK arena → ONE short random walk.
-// The walk is ordinary movement (no mining / digging / placing).
-// One outward walk after the arena teleport. The arena is small, but the
-// target stays at 5–10 blocks as requested; the walk keeps its heading and
-// stops when reached or when the arena boundary blocks further progress.
+// The arena has walls around spawn, so blind forward movement often stops at
+// 0–2 blocks. Pick a real 5–10 block target pathfinder can reach, then walk it
+// once with digging and block placement disabled.
 const AFK_WALK_MIN = 5;
 const AFK_WALK_MAX = 10;
+// Sneaking was tested and gave no benefit: the server still re-centred the
+// player, and a stuck sneak control can linger after a cancelled walk. Use
+// ordinary walking, which is what produced the verified 5–10 block walks.
+const AFK_WALK_SNEAK = false;
 const AFK_TELEPORT_WATCH_MS = 60000;
+
+// Auto-accept teleport requests from one trusted player only.
+// EssentialsX wording varies by version ("has requested to teleport to you",
+// "would like you to teleport to them", "wants to teleport here", ...), so
+// match the player name + request verb + the word teleport instead of one
+// exact sentence. Player chat ("RO0MII: teleport me") is excluded below.
+const TPA_PLAYER = 'RO0MII';
+// Real server wording seen in the panel:
+//   "RO0MII sent you a tpa request. (CLICK TO ACCEPT)"
+// Other EssentialsX versions use "has requested to teleport to you".
+const TPA_NAME = TPA_PLAYER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const TPA_REQUEST_RE = new RegExp(
+  '\\b' + TPA_NAME + '\\b[^\\n]{0,160}\\b(?:' +
+    'sent\\s+you\\s+(?:a\\s+)?(?:tpa|tpahere|teleport)\\s+request' +
+    '|(?:has\\s+)?requested(?:\\s+to)?[^\\n]{0,80}\\bteleport\\b' +
+    '|would\\s+like[^\\n]{0,80}\\bteleport\\b' +
+    '|wants?[^\\n]{0,80}\\bteleport\\b' +
+    '|wishes[^\\n]{0,80}\\bteleport\\b' +
+  ')',
+  'i'
+);
+const TPA_GLASS_RE = /(?:green|lime)/i;
+const TPA_CONFIRM_RE = /\b(?:confirm|accept|ok|yes|agree)\b|[✓✔]/i;
+const TPA_SPEAKER_RE = new RegExp('^\\s*<?' + TPA_NAME + '\\s*(?::|>)', 'i');
+// The server writes labels in Unicode small caps, e.g. "ᴄᴏɴꜰɪʀᴍ".
+// Normalise those glyphs before matching GUI item names and titles.
+const TPA_FANCY = {
+  'ᴀ': 'a', 'ʙ': 'b', 'ᴄ': 'c', 'ᴅ': 'd', 'ᴇ': 'e', 'ꜰ': 'f', 'ɢ': 'g', 'ʜ': 'h',
+  'ɪ': 'i', 'ᴊ': 'j', 'ᴋ': 'k', 'ʟ': 'l', 'ᴍ': 'm', 'ɴ': 'n', 'ᴏ': 'o', 'ᴘ': 'p',
+  'ʀ': 'r', 'ꜱ': 's', 'ᴛ': 't', 'ᴜ': 'u', 'ᴠ': 'v', 'ᴡ': 'w', 'ʏ': 'y', 'ᴢ': 'z',
+};
+const tpaNorm = (s) => String(s == null ? '' : s)
+  .replace(/[ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢ]/g, (c) => TPA_FANCY[c] || c);
+// Commands typed in the panel that open a teleport confirmation GUI.
+const TPA_SEND_RE = /^\/(?:tpa|tpahere|tpaccept|tpaaccept)\b/i;
+// "You have requested X to teleport..." is our own outgoing request, not an
+// incoming one that should trigger the Confirm click.
+const TPA_SELF_RE = /\byou\s+(?:have\s+|just\s+)?request(?:ed|ing)?\b|\brequest\s+sent\b/i;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Bot manager
@@ -317,6 +362,9 @@ class ManagedBot {
     this.switchCommand = cfg.switchCommand || '/server oneblock';
     this.switchDelay = clamp(Number(cfg.switchDelay) || 4000, 1000, 60000);
     this.autoReconnect = cfg.autoReconnect !== false;
+    // Auto AFK arena: after login, send /afk once per session automatically.
+    // Existing configs without the field get it enabled.
+    this.autoAfk = cfg.autoAfk !== false;
     this.antiAfk = cfg.antiAfk !== false;
     this.autoEat = cfg.autoEat !== false;
     this._eating = false;
@@ -363,6 +411,7 @@ class ManagedBot {
     this._loginRetry = null;
     this._assumeLogin = null;
     this._loginCooldown = 0;
+    this._ghostSessionUntil = 0;
     this._loginPromptSeen = false;
     this._loginGaveUp = false;
     this._lastPromptAt = 0;
@@ -375,15 +424,31 @@ class ManagedBot {
     this._refreshAt = 0;
     this._firstSpawn = true;
     this._guardKicked = false;
+    this._transientKickUntil = 0;
     this._invCache = null;
     this._afkClickUntil = 0;
     this._afkClickTimer = null;
+    this._tpaClickUntil = 0;
+    this._tpaClickTimer = null;
+    this._lastTpaAcceptAt = 0;
     this._afkSequence = null;
     this._afkTeleportTimer = null;
     this._afkWalkTimer = null;
+    this._afkWalkAbort = null;
     this._afkWalkPaused = false;
+    this._afkWalkActive = false;
+    this._afkWalkOnGoal = null;
+    this._afkWalkTarget = null;
+    this._afkWalkWaitStarted = 0;
     this._afkMovements = null;
+    this._autoAfkTimer = null;
+    this._autoAfkRetryTimer = null;
+    this._autoAfkAttempts = 0;
+    this._autoAfkSent = false;
     this._inAfkArena = false;
+    // Auto-learned AFK arena home; used to detect a teleport away from it.
+    this._arenaHome = null;
+    this._arenaCheckAt = 0;
 
     this.addLog('info', `Bot created for ${this.host}:${this.port}`);
   }
@@ -471,6 +536,7 @@ class ManagedBot {
       switchCommand: this.switchCommand,
       switchDelay: this.switchDelay,
       autoReconnect: this.autoReconnect,
+      autoAfk: this.autoAfk,
       antiAfk: this.antiAfk,
       autoEat: this.autoEat,
       reswitch: this.reswitch,
@@ -488,6 +554,7 @@ class ManagedBot {
       food: this.food,
       position: this.position,
       afkArena: !!this._inAfkArena,
+      arenaHome: this._arenaHome,
       ping: this.ping,
       proxy: this.proxy,
       proxySince: this.proxySince,
@@ -527,6 +594,7 @@ class ManagedBot {
       switchCommand: this.switchCommand,
       switchDelay: this.switchDelay,
       autoReconnect: this.autoReconnect,
+      autoAfk: this.autoAfk,
       antiAfk: this.antiAfk,
       autoEat: this.autoEat,
       reswitch: this.reswitch,
@@ -570,12 +638,16 @@ class ManagedBot {
     if (this._switchTimer) { clearTimeout(this._switchTimer); this._switchTimer = null; }
     if (this._reswitchTimer) { clearTimeout(this._reswitchTimer); this._reswitchTimer = null; }
     if (this._afkClickTimer) { clearTimeout(this._afkClickTimer); this._afkClickTimer = null; }
+    if (this._tpaClickTimer) { clearTimeout(this._tpaClickTimer); this._tpaClickTimer = null; }
     if (this._aliveTimer) { clearInterval(this._aliveTimer); this._aliveTimer = null; }
+    if (this._arenaTimer) { clearInterval(this._arenaTimer); this._arenaTimer = null; }
     if (this._worldTimer) { clearInterval(this._worldTimer); this._worldTimer = null; }
   }
   _startAliveWatch() {
     if (this._aliveTimer) clearInterval(this._aliveTimer);
     this._aliveTimer = setInterval(() => this._checkAlive(), 10000);
+    if (this._arenaTimer) clearInterval(this._arenaTimer);
+    this._arenaTimer = setInterval(() => this._checkArenaPosition(), 3000);
     if (this._worldTimer) clearInterval(this._worldTimer);
     // Chunks are the biggest per-bot memory cost. Keep only the nine around
     // the bot; physics still has the blocks under its feet.
@@ -598,6 +670,27 @@ class ManagedBot {
     }).sort((a, c) => a.d - c.d).slice(9).forEach((c) => {
       try { world.unloadColumn(c.x, c.z); } catch (_) {}
     });
+  }
+
+  // The arena home is learned from the position at the start of the AFK walk.
+  // A TPA teleport moves the bot far away; reconnecting gives it a fresh /afk.
+  _checkArenaPosition() {
+    if (!this.autoAfk || !this._inAfkArena || !this._arenaHome) return;
+    if (!this.bot || !this.bot.entity || !this.bot.entity.position) return;
+    if (now() - this._arenaCheckAt < 3000) return;
+    this._arenaCheckAt = now();
+    const p = this.bot.entity.position;
+    const h = this._arenaHome;
+    const dx = Math.abs(p.x - h.x);
+    const dy = Math.abs(p.y - h.y);
+    const dz = Math.abs(p.z - h.z);
+    if (dx <= 20 && dz <= 20 && dy <= 10) return;
+    this.addLog('warn', `AFK arena: out of range at (${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)}) — reconnecting and sending /afk.`);
+    this._arenaHome = null;
+    this._inAfkArena = false;
+    this._autoAfkSent = false;
+    this._cancelAfkSequence();
+    this.restart();
   }
 
   _checkAlive() {
@@ -625,16 +718,82 @@ class ManagedBot {
 
   _stopAfk() {
     if (this._afkTimer) { clearInterval(this._afkTimer); this._afkTimer = null; }
+    if (this._autoAfkTimer) { clearTimeout(this._autoAfkTimer); this._autoAfkTimer = null; }
+    if (this._autoAfkRetryTimer) { clearInterval(this._autoAfkRetryTimer); this._autoAfkRetryTimer = null; }
     this._cancelAfkSequence();
+  }
+
+  /** Wait for auto-login, then keep sending /afk until the arena is reached.
+   *  The first attempt is staggered per bot: a fleet-wide burst makes the
+   *  server drop the AFK GUI for most of the bots. */
+  _scheduleAutoAfk() {
+    if (!this.autoAfk || this._inAfkArena || this._autoAfkSent || this._autoAfkTimer) return;
+    const seed = Array.from(this.id).reduce((a, c) => a + c.charCodeAt(0), 0) % 9000;
+    const deadline = now() + 90000;
+    const tick = () => {
+      if (!this.wanted || !this.bot || !this.bot.player || this._inAfkArena || this._autoAfkSent) return;
+      if (now() > deadline) {
+        this.addLog('warn', 'Auto AFK: login did not complete in time — skipping /afk.');
+        return;
+      }
+      if (this.autoLogin && !this.loggedIn) {
+        this._autoAfkTimer = setTimeout(tick, 1500);
+        return;
+      }
+      this._autoAfkTimer = null;
+      this._autoAfkSent = true;
+      this._autoAfkAttempts = 0;
+      this._sendAutoAfk();
+      // The GUI can be dropped when many bots enter at once. Retry quietly
+      // until the arena is reached; a successful walk stops the supervisor.
+      this._autoAfkRetryTimer = setInterval(() => {
+        if (!this.wanted || this._inAfkArena || (this._afkSequence && this._afkSequence.walked)) {
+          if (this._autoAfkRetryTimer) { clearInterval(this._autoAfkRetryTimer); this._autoAfkRetryTimer = null; }
+          return;
+        }
+        if (this._autoAfkAttempts >= 3) {
+          this.addLog('warn', 'Auto AFK: no arena after 3 attempts — stopping retries.');
+          if (this._autoAfkRetryTimer) { clearInterval(this._autoAfkRetryTimer); this._autoAfkRetryTimer = null; }
+          return;
+        }
+        this._sendAutoAfk();
+      }, 24000);
+      if (this._autoAfkRetryTimer.unref) this._autoAfkRetryTimer.unref();
+    };
+    this._autoAfkTimer = setTimeout(tick, 2500 + seed);
+  }
+
+  _sendAutoAfk() {
+    if (!this.bot || !this.bot.player || this._inAfkArena) return;
+    this._autoAfkAttempts++;
+    try {
+      this.sendChat('/afk', { allowAfkRetry: true });
+      this.addLog('info', `Auto AFK: /afk sent automatically (attempt ${this._autoAfkAttempts}).`);
+    } catch (e) {
+      this.addLog('err', `Auto AFK: ${e.message || e}`);
+    }
   }
 
   // Cancel the /afk → countdown → arena walk sequence and release movement.
   _cancelAfkSequence() {
     if (this._afkTeleportTimer) { clearInterval(this._afkTeleportTimer); this._afkTeleportTimer = null; }
     if (this._afkWalkTimer) { clearInterval(this._afkWalkTimer); this._afkWalkTimer = null; }
+    if (this._afkWalkAbort) { try { this._afkWalkAbort.abort(); } catch (_) {} this._afkWalkAbort = null; }
+    this._afkWalkToken = (this._afkWalkToken || 0) + 1;
     this._afkWalkPaused = false;
+    this._afkWalkActive = false;
     if (this._afkSequence && !this._afkSequence.walked && this.bot) {
       try { this.bot.setControlState('forward', false); } catch (_) {}
+    }
+    if (this.bot) {
+      try {
+        this.bot.setControlState('forward', false);
+        this.bot.setControlState('sprint', false);
+        this.bot.setControlState('sneak', false);
+        this.bot.setControlState('jump', false);
+        this.bot.setControlState('left', false);
+        this.bot.setControlState('right', false);
+      } catch (_) {}
     }
     if (this.bot && this.bot.pathfinder) {
       try { this.bot.pathfinder.setGoal(null); } catch (_) {}
@@ -652,6 +811,7 @@ class ManagedBot {
     this._permanentBan = false;
     this._pauseLogged = false;
     this._proxyTries = 0;
+    this._autoAfkSent = false;
     this.addLog('info', 'Starting bot…');
     this._connect();
   }
@@ -773,6 +933,9 @@ class ManagedBot {
 
   _connectNow(proxy, socket) {
     if (!this.wanted) return;
+    // Keep the pin table in sync with the socket we actually opened, even if
+    // a reshuffle cleared assignments while this tunnel was being established.
+    proxyPool.hold(this.id, proxy);
     this._clearTimers();
     this._stopAfk();
     this._guardKicked = false;
@@ -876,12 +1039,19 @@ class ManagedBot {
       this._permanentBan = false;
       this._pauseLogged = false;
       this._lastKick = '';
+      this._transientKickUntil = 0;
+      this._ghostSessionUntil = 0;
+      this._guardKicked = false;
       // An AFK-arena teleport can emit another spawn event. Keep the arena
       // label instead of overwriting it with the generic "Online" text.
       this.setStatus('online', this._inAfkArena ? 'AFK arena' : 'Online');
       this.addLog('ok', `Joined ${this.host}:${this.port} as ${this.name}`);
 
       this._startAfk();
+      // Panel-driven AFK: one /afk per session once login completes. The
+      // existing GUI-click → countdown → teleport → single-walk code then
+      // runs without anyone touching the dashboard.
+      this._scheduleAutoAfk();
       this._startAliveWatch();
       this._refresh(true);
       this._later(() => this._maybeEat(), 2600);
@@ -905,10 +1075,9 @@ class ManagedBot {
       }
 
       if (!firstSpawn) this.addLog('info', 'Spawned again (sub-server transfer).');
-      // A dimension/world change after the AFK countdown is a teleport signal.
-      if (this._afkSequence && !this._afkSequence.teleported && !this._afkSequence.walked && now() - this._afkSequence.armedAt > 4000) {
-        this._afkTeleportDetected('world change');
-      }
+      // Only the teleport announcement proves arena entry. A plain spawn event
+      // can be a lobby transfer or respawn; treating it as a teleport made bots
+      // walk from the wrong origin and get reset to spawn.
     });
 
     bot.on('death', () => {
@@ -918,9 +1087,10 @@ class ManagedBot {
     bot.on('kicked', (reason) => {
       this._sawKick = true;
       this._lastKick = chatText(reason) || stripColor(String(reason || ''));
+      this.addLog('warn', `Kicked by server: ${this._lastKick.slice(0, 300)}`);
     });
 
-    bot.on('messagestr', (message) => this._onMessage(message));
+    bot.on('messagestr', (message, position, original, sender) => this._onMessage(message, original, sender));
 
     bot.on('whisper', (username, message) => {
       this.addLog('chat', `[whisper] ${username}: ${message}`);
@@ -950,16 +1120,22 @@ class ManagedBot {
     bot.on('kicked', (reason) => {
       const r = (chatText(reason) || stripColor(String(reason || ''))).slice(0, 600);
       if (/banned/i.test(r)) {
-        this._banText = stripColor(r).replace(/\s+/g, ' ').trim().slice(0, 400);
-        // A staff ban is not a cooldown. Stop retrying forever and let the
-        // user resolve it through the server's appeal channel.
-        this._permanentBan = /permanently banned|ip-banned by an operator|appeal at/i.test(r);
-        this._bannedUntil = this._permanentBan ? 0 : now() + 30 * 60 * 1000;
-        blockConnectGate(120000);
-        // Some servers send the kick packet but leave the socket open. Close it
-        // ourselves so the ban settles immediately instead of looking like a
-        // generic join timeout.
-        this._later(() => { try { if (this.bot) this.bot.end('Banned by server'); } catch (_) {} }, 300);
+        const ban = parseBanDuration(r, now());
+        // A chat/console line about another player is not this bot's ban.
+        const someoneElse = ban.owner
+          && ban.owner.toLowerCase() !== String(this.name || '').toLowerCase();
+        if (!someoneElse) {
+          this._banText = ban.text;
+          // Permanent bans are never auto-retried; temporary bans wait their
+          // full stated duration (e.g. 3 days) and then auto-reconnect.
+          this._permanentBan = ban.permanent;
+          this._bannedUntil = ban.until;
+          blockConnectGate(120000);
+          // Some servers send the kick packet but leave the socket open. Close it
+          // ourselves so the ban settles immediately instead of looking like a
+          // generic join timeout.
+          this._later(() => { try { if (this.bot) this.bot.end('Banned by server'); } catch (_) {} }, 300);
+        }
       }
       if (/slow down|connecting too quickly|too many connections|rate.?limit|throttl|too fast|try again later|too many login/i.test(r)) {
         this._throttleHits = (this._throttleHits || 0) + 1;
@@ -970,7 +1146,15 @@ class ManagedBot {
         blockConnectGate(wait);
       }
       const short = r.length > 220 ? r.slice(0, 217) + '…' : r;
-      let label = 'Kicked — reconnecting';
+      // Velocity sometimes drops a healthy session with this generic backend
+      // error. It is not a ban, a rate limit or a proxy failure: rejoin on the
+      // same route after a few seconds instead of entering the 8s+ backoff.
+      const transient = isTransientKick(r);
+      if (transient) this._transientKickUntil = now() + 30000;
+      // The old game session can outlive its socket by ~30s. Reconnecting on a
+      // fresh IP just gets "already online" again and burns good routes.
+      if (/already online/i.test(r)) this._ghostSessionUntil = now() + 45000;
+      let label = transient ? 'Rejoining after server error…' : 'Kicked — reconnecting';
       if (/verification failed|verify/i.test(r)) label = 'Server verification failed';
       else if (/blocked from entering/i.test(r)) label = 'Temporarily blocked by server';
       else if (/banned/i.test(r)) label = 'Banned by server';
@@ -989,16 +1173,61 @@ class ManagedBot {
       this.lastError = msg;
       if (OFFLINE_CODES.includes(code)) {
         this.addLog('warn', `Server unreachable (${code}).`);
+        // A mid-session socket reset means this route died while the bot was
+        // already online. Treat it like the backend internal-error kick: retire
+        // the pin and re-home instead of reconnecting to the same bad IP.
+        if (this.connectedAt) this._transientKickUntil = now() + 30000;
       } else {
         this.addLog('err', `Error: ${msg}`);
       }
     });
 
-    bot.on('end', () => {
+    bot.on('end', (reason) => {
       this._clearTimers();
       this._stopAfk();
       this._verifying = false;
-      if (this.proxy && !this.connectedAt) proxyPool.reportFailure(this.proxy);
+      // A tunnel can fail in two ways: it never completes the Minecraft
+      // handshake, or the server drops the session with a backend internal
+      // error. In both cases the route is bad for this bot — drop the pin so
+      // the fast retry cannot reuse the same IP (the letsdoit loop).
+      const route = this.proxy ? `${this.proxy.ip || this.proxy.host}:${this.proxy.port}` : '';
+      const sessionSec = this.connectedAt ? Math.round((now() - this.connectedAt) / 1000) : 0;
+      const endReason = clean(String(reason || this._lastKick || ''), 240);
+      // Every completed session is uptime evidence for its route — including
+      // deliberate restarts. Handshakes that never reached spawn have no
+      // sessionSec and must not earn credit.
+      if (this.proxy && sessionSec > 0) {
+        proxyPool.reportSession(this.proxy, sessionSec * 1000, endReason);
+      }
+      const outcome = classifyDisconnect({
+        proxy: this.proxy,
+        wanted: this.wanted,
+        connectedAt: this.connectedAt,
+        sawKick: this._sawKick,
+        lastKick: this._lastKick,
+        permanentBan: this._permanentBan,
+        bannedUntil: this._bannedUntil,
+        rateLimitedUntil: this._rateLimitedUntil,
+        transientKickUntil: this._transientKickUntil,
+        ghostSessionUntil: this._ghostSessionUntil,
+        now: now(),
+      });
+      const { handshakeFailed, silentDrop, routeFailed, severity, ghostWait, transientWait } = outcome;
+      this._transientKickUntil = 0;
+      if (routeFailed && this.proxy) {
+        // A failed handshake cools the route but keeps a proven IP reserved
+        // for its owner. A confirmed live-session drop gets an escalating
+        // cooldown and is only retired after repeated failures.
+        if (severity === 'cooldown') proxyPool.handleHandshakeFailure(this.id, this.proxy);
+        else {
+          proxyPool.reportGameFailure(this.proxy);
+          proxyPool.release(this.id);
+        }
+        // Clear the stale label too, so the dashboard never shows two bots
+        // "on" the same IP while one is actually still reconnecting. The
+        // assignment in the pool survives when the route was proven.
+        this.proxy = null;
+      }
       this.connectedAt = null;
       this.joinedAt = null;
       this.players = 0;
@@ -1009,13 +1238,44 @@ class ManagedBot {
       this.loggedIn = false;
       this.switched = false;
       this.bot = null;
+      // A reconnect is a new session: it must get its own /afk and its own
+      // arena walk instead of inheriting the previous session's "already sent".
+      this._autoAfkSent = false;
+      this._autoAfkAttempts = 0;
       this.emit();
 
       if (!this.wanted) {
         this.setStatus('stopped', 'Stopped');
         return;
       }
-      this.addLog('warn', 'Disconnected.');
+      if (ghostWait > 0) {
+        this.setStatus('reconnecting', 'Waiting for old session to expire…');
+        this.addLog('warn', `Server still has this player online — waiting ${Math.ceil(ghostWait / 1000)}s before retrying the same route.`);
+        this._later(() => this._connect(), ghostWait + 1000);
+        return;
+      }
+      if (transientWait > 0) {
+        // The Velocity backend error is not the proxy's fault. Keep the pin and
+        // rejoin on the same address after its session settles; retiring the
+        // route here is what pushed long-lived bots into the untested pool.
+        this.setStatus('reconnecting', 'Rejoining after server error…');
+        this.addLog('warn', `Server backend error — keeping ${route || 'the same route'} and rejoining in ${Math.ceil(transientWait / 1000)}s.`);
+        this._later(() => this._connect(), transientWait + 1000);
+        return;
+      }
+      this.addLog('warn', `Disconnected${endReason ? ` (${endReason})` : ''} — ${route || 'no route'} after ${sessionSec}s online; ${routeFailed ? (severity || 'route failure') : 'no route failure'}.`);
+      if (routeFailed && this._proxyTries < 3) {
+        this._proxyTries++;
+        this.setStatus('reconnecting', 'Switching proxy…');
+        this.addLog('warn', handshakeFailed
+          ? `${route} never reached spawn — trying another route.`
+          : silentDrop
+            ? `${route} dropped the session without a reason — trying another route.`
+            : `${route} failed mid-session — trying another route.`);
+        this._later(() => this._connect(), 800);
+        return;
+      }
+      this._proxyTries = 0;
       this.setStatus('reconnecting', 'Disconnected');
       this._retries = (this._retries || 0) + 1;
       // Kick reasons are read from the tunnel itself — never retry direct,
@@ -1066,8 +1326,72 @@ class ManagedBot {
     }, delay);
   }
 
+  // ── trusted-player TPA → /tpaaccept RO0MII → Confirm GUI ──
+  // This server needs the player name: plain /tpaccept does nothing.
+  _maybeAcceptTpa(message) {
+    if (!this.bot || !this.bot.player || this.status !== 'online' || !this.loggedIn) return;
+    if (now() - this._lastTpaAcceptAt < 15000) return;
+    const text = tpaNorm(message);
+    // "You have requested ..." is the echo of our own /tpa or /tpahere.
+    if (TPA_SELF_RE.test(text)) return;
+    // A player saying "RO0MII: teleport..." in chat is not a request.
+    if (TPA_SPEAKER_RE.test(text)) return;
+    if (!TPA_REQUEST_RE.test(text)) return;
+
+    this._lastTpaAcceptAt = now();
+    this._tpaClickUntil = now() + 20000;
+    this.addLog('ok', `TPA: ${TPA_PLAYER} requested a teleport — accepting with /tpaaccept ${TPA_PLAYER}.`);
+    const cmd = `/tpaaccept ${TPA_PLAYER}`;
+    try {
+      this.sendChat(cmd);
+      this.addLog('info', 'TPA: waiting for the confirmation GUI to click Confirm.');
+    } catch (e) {
+      this._tpaClickUntil = 0;
+      this.addLog('err', `TPA: ${cmd} failed: ${e.message || e}`);
+    }
+  }
+
+  _itemText(it) {
+    const parts = [];
+    try { if (it && it.displayName) parts.push(chatText(it.displayName) || String(it.displayName)); } catch (_) {}
+    try { if (it && it.name) parts.push(String(it.name)); } catch (_) {}
+    try {
+      if (it && Array.isArray(it.lore)) it.lore.forEach((l) => parts.push(chatText(l) || String(l)));
+    } catch (_) {}
+    return stripColor(parts.join(' '));
+  }
+
+  // Find the green glass "Confirm / OK" button in a teleport confirmation GUI.
+  // Handles Unicode small-caps labels such as "ᴄᴏɴꜰɪʀᴍ". Green glass with a
+  // confirm label wins; a confirm label or plain green glass are fallbacks.
+  _tpaConfirmSlot(window, title) {
+    const slots = (window && Array.isArray(window.slots)) ? window.slots : [];
+    // Never consume an unrelated GUI while a TPA is pending. AFK windows are
+    // already skipped by the caller; this guards inventories and other menus.
+    const looksTpa = /teleport|\btpa\b|confirm|accept|request/i.test(tpaNorm(title || ''));
+    const candidates = [];
+    for (let i = 0; i < slots.length; i++) {
+      const it = slots[i];
+      if (!it) continue;
+      const text = tpaNorm(this._itemText(it));
+      if (!text) continue;
+      const name = tpaNorm(String(it.name || ''));
+      const glass = (TPA_GLASS_RE.test(name) && /glass|pane/i.test(name)) ||
+                    (TPA_GLASS_RE.test(text) && /glass|pane/i.test(text));
+      const confirm = TPA_CONFIRM_RE.test(text);
+      const score = glass && confirm ? 3 : confirm ? 2 : glass ? 1 : 0;
+      if (score) candidates.push({ slot: i, score });
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    const best = candidates[0];
+    if (!best) return null;
+    // A green glass + Confirm label is unambiguous; weaker matches only on a
+    // window that actually looks like a teleport confirmation.
+    return best.score >= 3 || looksTpa ? best.slot : null;
+  }
+
   // ── auto login ──
-  _onMessage(raw) {
+  _onMessage(raw, original, sender) {
     const message = stripColor(raw);
     // Don't flood the console with other players' join/leave spam. The bot's
     // own join/leave is already logged as a real event.
@@ -1090,8 +1414,30 @@ class ManagedBot {
     }
     if (this._verifying) return;
 
+    // Trusted-player teleport request → /tpaaccept RO0MII → Confirm GUI.
+    this._maybeAcceptTpa(message, original);
+
+    // A RO0MII player chat (not the system request line) starts the sequential
+    // /tpa RO0MII queue across the AFK-arena bots. An acceptance message
+    // advances the queue after the requested cooldown.
+    if (manager && manager.tpaQueue) {
+      const fromRoomii = sender
+        ? tpaNorm(sender).toLowerCase() === TPA_PLAYER.toLowerCase()
+        : TPA_SPEAKER_RE.test(message);
+      if (fromRoomii && !TPA_REQUEST_RE.test(tpaNorm(message))) {
+        startTpaQueue(this);
+      }
+      if (manager.tpaQueue.active &&
+          /\b(?:accepted|approved)\b[^\n.]{0,80}\b(?:teleport|tpa|tpahere|request)\b|\b(?:teleport|tpa) request accepted\b/i.test(message)) {
+        onTpaQueueAccepted(this);
+      }
+    }
+
     // Server announcement confirming the arena teleport (ignore player chat).
-    if (this._afkSequence && !this._afkSequence.teleported && !this._afkSequence.walked &&
+    // Accept it even if the GUI/click sequence was missed: the teleport text
+    // itself is proof the bot is in the arena and must do its one short walk.
+    if (this.autoAfk && this.status === 'online' && this._autoAfkSent &&
+        (!this._afkSequence || (!this._afkSequence.teleported && !this._afkSequence.walked)) &&
         /\b(?:afk[ -]?arena|teleported successfully|teleport(?:ed)? to (?:the )?afk)\b/i.test(message) &&
         !/^[A-Za-z0-9_.]{1,16}\s*:/.test(message)) {
       this._afkTeleportDetected('server message');
@@ -1345,10 +1691,20 @@ class ManagedBot {
   }
 
   // ── actions from the dashboard ──
-  sendChat(text) {
+  sendChat(text, opts = {}) {
     const msg = clean(text, 250).trim();
     if (!msg) throw new Error('Message is empty.');
     if (!this.bot || !this.bot.player) throw new Error('Bot is not connected.');
+    // A second /afk in the same session starts a second countdown and a second
+    // walk. Only the internal GUI-retry may resend while a countdown is still
+    // pending; panel/manual clicks are ignored after a session has begun.
+    if (/^\/afk\b/i.test(msg) && !opts.allowAfkRetry) {
+      const pending = this._afkSequence && !this._afkSequence.teleported && !this._afkSequence.walked;
+      if (this._inAfkArena || this._afkWalkActive || pending) {
+        this.addLog('info', 'AFK ignored — this session has already started its one walk.');
+        return false;
+      }
+    }
     this.bot.chat(msg);
     this.addLog('sent', msg);
     // /afk usually opens a chest-style GUI a few seconds later — arm the click.
@@ -1356,13 +1712,50 @@ class ManagedBot {
       this._afkClickUntil = now() + 20000;
       this.addLog('info', 'AFK armed — the first slot of the GUI that opens will be clicked automatically.');
     }
+    // Panel-typed /tpa, /tpahere or /tpaccept also opens a Confirm GUI. Arm it
+    // unless the trusted-player handler already armed the very same window.
+    if (TPA_SEND_RE.test(msg) && this._tpaClickUntil <= now()) {
+      this._tpaClickUntil = now() + 30000;
+      this.addLog('info', 'TPA armed — the Confirm glass in the GUI that opens will be clicked automatically.');
+    }
   }
 
   _onWindowOpen(window) {
-    if (!window || now() > this._afkClickUntil) return;
-    this._afkClickUntil = 0;
+    if (!window) return;
     let title = '';
     try { title = stripColor(chatText(window.title) || String(window.title || '')).slice(0, 80); } catch (_) {}
+
+    // Trusted-player TPA confirmation first — it must never be mistaken for
+    // the AFK GUI that is armed by /afk.
+    if (this._tpaClickUntil > now() && !/afk/i.test(tpaNorm(title))) {
+      const slot = this._tpaConfirmSlot(window, title);
+      const slots = Array.isArray(window.slots) ? window.slots : [];
+      const labels = slots.map((it, i) => {
+        if (!it) return null;
+        const text = tpaNorm(this._itemText(it)).replace(/\s+/g, ' ').slice(0, 36);
+        return text ? `${i}:${text}` : null;
+      }).filter(Boolean).slice(0, 14);
+      this.addLog('info', `TPA GUI opened${title ? `: ${title.slice(0, 60)}` : ''} — slots: ${labels.join(' | ') || '(empty)'}`);
+      if (slot != null) {
+        this._tpaClickUntil = 0;
+        this.addLog('info', `TPA: clicking Confirm (slot ${slot}) in 0.4s.`);
+        if (this._tpaClickTimer) clearTimeout(this._tpaClickTimer);
+        this._tpaClickTimer = setTimeout(() => {
+          this._tpaClickTimer = null;
+          if (!this.bot) return;
+          try {
+            this.bot.clickWindow(slot, 0, 0);
+            this.addLog('ok', `TPA: clicked Confirm in slot ${slot} automatically.`);
+          } catch (e) {
+            this.addLog('err', `TPA auto-click failed: ${e.message || e}`);
+          }
+        }, 400);
+        return;
+      }
+    }
+
+    if (now() > this._afkClickUntil) return;
+    this._afkClickUntil = 0;
     this.addLog('info', `AFK GUI opened${title ? `: ${title.slice(0, 60)}` : ''} — clicking slot 1 in 0.4s.`);
     if (this._afkClickTimer) clearTimeout(this._afkClickTimer);
     this._afkClickTimer = setTimeout(() => {
@@ -1381,6 +1774,12 @@ class ManagedBot {
   // ── /afk → GUI click → countdown → arena → one random walk ──
   // Movement is plain walking. No block is mined, dug or placed.
   _startAfkSequence() {
+    // A late GUI click or retry must not cancel a walk that is already in
+    // progress: every AFK session gets exactly one walk, not a restart loop.
+    if (this._afkWalkActive) {
+      this.addLog('info', 'AFK: GUI click ignored — the session walk is already running.');
+      return;
+    }
     this._cancelAfkSequence();
     const p = this.bot && this.bot.entity && this.bot.entity.position;
     const dim = this.bot && this.bot.game && this.bot.game.dimension;
@@ -1424,23 +1823,32 @@ class ManagedBot {
         return;
       }
       if (now() > deadline) {
-        // Some bots are already standing in the arena when /afk is repeated;
-        // the server then sends no teleport message. Treat those coordinates
-        // as arena entry so they still get their one-time outward walk.
-        const nearArena = Math.hypot(p.x, p.z) <= 3 && Math.abs(p.y - 73) <= 4;
-        if (nearArena) {
-          this._afkTeleportDetected('already in arena');
-        } else {
-          this._cancelAfkSequence();
-          this.addLog('warn', 'AFK: no arena teleport detected — skipping the one-time move.');
-        }
+        // Spawn and the AFK arena share the same coordinates. Never treat
+        // "standing near 0,73,0" as arena entry: that starts the walk during
+        // the countdown, while the server is still freezing the player.
+        // Only the teleport announcement is proof of a real arena session.
+        this._cancelAfkSequence();
+        this.addLog('warn', 'AFK: no teleport announcement — skipping the one-time move.');
       }
     }, 500);
   }
 
   _afkTeleportDetected(reason) {
-    const seq = this._afkSequence;
-    if (!seq || seq.teleported || seq.walked) return;
+    // The teleport announcement can arrive even when the GUI/click state was
+    // missed under load. Do not lose the arena session just because there is
+    // no sequence object yet — create a minimal one and still walk once.
+    let seq = this._afkSequence;
+    if (!seq) {
+      const pos = this.bot && this.bot.entity ? this.bot.entity.position : null;
+      seq = this._afkSequence = {
+        armedAt: now(),
+        origin: pos ? { x: pos.x, y: pos.y, z: pos.z } : null,
+        dimension: this.bot && this.bot.game ? this.bot.game.dimension : null,
+        teleported: false,
+        walked: false,
+      };
+    }
+    if (seq.teleported || seq.walked) return;
     seq.teleported = true;
     this._inAfkArena = true;
     if (this.status === 'online') this.setStatus('online', 'AFK arena');
@@ -1449,107 +1857,106 @@ class ManagedBot {
     this._later(() => this._afkWalkOnce(), 1500);
   }
 
-  _afkWalkOnce() {
+  /** Manual one-walk trigger used by the panel/API for diagnostics. */
+  walkNow(debug = false) {
+    if (!this.bot || !this.bot.entity) throw new Error('Bot is not spawned.');
+    if (this._afkWalkActive) return false; // one walk per session, never restart mid-walk
+    this._cancelAfkSequence();
+    this._afkSequence = { at: now(), teleported: true, walked: false };
+    this._inAfkArena = true;
+    if (this._afkWalkTimer) { clearInterval(this._afkWalkTimer); this._afkWalkTimer = null; }
+    this._afkWalkPaused = false;
+    this._afkWalkOnce(debug);
+    return true;
+  }
+
+  _afkWalkOnce(debug = false) {
     const seq = this._afkSequence;
     if (!seq || !seq.teleported || seq.walked || !this.bot || !this.bot.entity) return;
     seq.walked = true;
     this._afkWalkPaused = true;
-    const p = this.bot.entity.position;
-    // One walk, one general direction, then stop. Plain forward control works
-    // in the tiny arena where pathfinder goals get stuck against the walls.
-    this._afkWalkOrigin = { x: p.x, y: p.y, z: p.z };
-    this._afkWalkYaw = Math.random() * Math.PI * 2;
-    this._afkWalkCurrentYaw = this._afkWalkYaw;
-    this._afkWalkEverMoved = false;
-    this._afkWalkTry = 0;
-    this._afkTarget = AFK_WALK_MIN + Math.floor(Math.random() * (AFK_WALK_MAX - AFK_WALK_MIN + 1));
-    this._afkWalkMoved = 0;
-    this._afkWalkLegs = 0;
-    this._afkWalkDeadline = now() + 40000;
-    this.addLog('info', `AFK arena: one continuous walk of ${this._afkTarget} blocks away from spawn (walking only).`);
-    this._afkWalkStep();
-  }
-
-  // Hold "forward" briefly, measure net movement from the arena entry point,
-  // then either continue outward or try a nearby outward yaw if blocked.
-  // Only control states are used — never dig, place, or pathfinder.
-  _afkWalkStep() {
+    this._afkWalkActive = true;
     const b = this.bot;
-    if (!b || !b.entity) { this._finishAfkWalk('bot unavailable'); return; }
-    const origin = this._afkWalkOrigin || { x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z };
-    const cur = b.entity.position;
-    const net = Math.hypot(cur.x - origin.x, cur.z - origin.z);
-    this._afkWalkMoved = net;
-    if (net >= this._afkTarget) {
-      this._finishAfkWalk(`${net.toFixed(1)} blocks from spawn — stopped`);
-      return;
-    }
-    if (this._afkWalkLegs >= 32 || now() > this._afkWalkDeadline) {
-      this._finishAfkWalk(`${net.toFixed(1)} of ${this._afkTarget} blocks (arena limit) — stopped`);
-      return;
-    }
-    // Mineflayer's forward vector is (-sin(yaw), -cos(yaw)). Before the first
-    // step any direction is outward, so a blocked side may be swapped for its
-    // opposite. After the bot has actually moved, NEVER flip 180° — keep the
-    // current outward heading and only nudge slightly around obstacles.
-    let yaw;
-    if (!this._afkWalkEverMoved) {
-      // Eight evenly spread headings before any progress: find an opening in
-      // the arena instead of repeatedly ramming the same wall.
-      const offsets = [0, Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, 3 * Math.PI / 4, -3 * Math.PI / 4, Math.PI];
-      yaw = this._afkWalkYaw + offsets[this._afkWalkTry % offsets.length];
-    } else {
-      const outward = net > 0.3
-        ? Math.atan2(-(cur.x - origin.x), -(cur.z - origin.z))
-        : this._afkWalkCurrentYaw;
-      const offsets = [0, 0.35, -0.35, 0.7, -0.7];
-      yaw = outward + offsets[this._afkWalkTry % offsets.length];
-    }
-    this._afkWalkCurrentYaw = yaw;
-    const stepStart = { x: cur.x, y: cur.y, z: cur.z };
-    this._afkWalkLegs++;
-    try {
-      b.look(yaw, 0, true);
-      b.setControlState('forward', true);
-      b.setControlState('sprint', false);
-    } catch (e) {
-      this._finishAfkWalk(`walking controls unavailable: ${e && e.message ? e.message : e}`);
-      return;
-    }
-    this._afkWalkTimer = setTimeout(() => {
-      // Keep "forward" held between steps. Releasing it every 1.2s lets the
-      // server rubber-band the bot back to the arena centre.
-      const p = this.bot && this.bot.entity && this.bot.entity.position;
-      const jumped = p && (Math.hypot(p.x - stepStart.x, p.z - stepStart.z) > 7 || Math.abs(p.y - stepStart.y) > 4);
-      if (jumped) {
-        this._finishAfkWalk(`${net.toFixed(1)} blocks (server teleported mid-walk — jump ignored)`);
-        return;
+    const p = b.entity.position;
+    // The teleport announcement can arrive before the server actually moves
+    // the player. Use the position at walk start (after the settle delay),
+    // not the teleport-time snapshot — that snapshot was ~596 blocks away in
+    // the lobby and produced fake "596 blocks from spawn" walk results.
+    const origin = { x: p.x, y: p.y, z: p.z };
+    // Auto-learn the arena home here — after the settle delay the player is
+    // really in the arena, unlike the early teleport-announcement snapshot.
+    this._arenaHome = { x: origin.x, y: origin.y, z: origin.z };
+    this._afkWalkOrigin = origin;
+    this._afkWalkWaitStarted = 0;
+    const token = (this._afkWalkToken || 0) + 1;
+    this._afkWalkToken = token;
+    // A previous engine may still be driving after a reconnect or a manual
+    // retry. Stop it before this one takes the controls.
+    if (this._afkWalkAbort) { try { this._afkWalkAbort.abort(); } catch (_) {} }
+    const abort = new AbortController();
+    this._afkWalkAbort = abort;
+    this.addLog('info', `AFK arena: mapping the arena and choosing one random ${AFK_WALK_MIN}–${AFK_WALK_MAX} block walk (walking only)…`);
+    this._afkWalkDeadline = now() + 60000;
+    const route = this.proxy;
+
+    // Dedicated engine: own grid + BFS + A* + anti-stuck driving. It waits for
+    // the arena chunks, so the teleport gap no longer makes every direction
+    // look blocked, and a blocked bot jumps/strafes/re-routes instead of
+    // standing still (or turning in place) until the timeout.
+    runArenaWalk(b, {
+      minDistance: AFK_WALK_MIN,
+      maxDistance: AFK_WALK_MAX,
+      sneak: AFK_WALK_SNEAK,
+      preferMin: Math.max(AFK_WALK_MIN, 6),
+      chunkWaitMs: 15000,
+      walkTimeoutMs: 45000,
+      debugEveryMs: debug ? 1000 : 0,
+      signal: abort.signal,
+      onTrace: (text) => {
+        if (/debug |steady|packet|heading|opening|freeze|rubber|reset|cancelled|grid |blocked|stuck|arrived|final/.test(text)) {
+          this.addLog('info', `AFK walk: ${text}`);
+        }
+      },
+    }).then((result) => {
+      if (this._afkWalkToken !== token) return;
+      this._afkWalkAbort = null;
+      this._afkWalkTarget = result.target || null;
+      const travelled = Math.max(result.moved || 0, result.walked || 0);
+      if (result.ok) {
+        if (route) proxyPool.reportOk(route);
+        this._finishAfkWalk(`${travelled.toFixed(1)} blocks walked — target reached`);
+      } else {
+        // A route that cannot complete the one walk is not fit for the AFK
+        // fleet even though its TCP tunnel looked healthy.
+        if (route && (result.reason === 'server rubber-band' || result.reason === 'walk timeout')) {
+          proxyPool.reportWalkFailure(route);
+        }
+        this._finishAfkWalk(`${travelled.toFixed(1)} blocks walked — ${result.reason}`);
       }
-      const after = p ? Math.hypot(p.x - origin.x, p.z - origin.z) : net;
-      this._afkWalkMoved = after;
-      if (after >= this._afkTarget) {
-        this._finishAfkWalk(`${after.toFixed(1)} blocks from spawn — stopped`);
-        return;
-      }
-      if (this._afkWalkLegs >= 32 || now() > this._afkWalkDeadline) {
-        this._finishAfkWalk(`${after.toFixed(1)} of ${this._afkTarget} blocks (arena limit) — stopped`);
-        return;
-      }
-      // Keep the yaw when progress was made; only turn slightly when stuck.
-      if (after > net + 0.25) this._afkWalkEverMoved = true;
-      this._afkWalkTry = after > net + 0.25 ? 0 : this._afkWalkTry + 1;
-      this._later(() => this._afkWalkStep(), 120);
-    }, 1200);
+    }).catch((e) => {
+      if (this._afkWalkToken !== token) return;
+      this._afkWalkAbort = null;
+      this._finishAfkWalk(`walk error: ${e && e.message ? e.message : e}`);
+    });
   }
 
   _finishAfkWalk(reason) {
-    if (this._afkWalkTimer) { clearTimeout(this._afkWalkTimer); this._afkWalkTimer = null; }
+    this._afkWalkActive = false;
+    if (this._afkWalkTimer) { clearInterval(this._afkWalkTimer); this._afkWalkTimer = null; }
+    if (this._afkWalkOnGoal && this.bot) {
+      try { this.bot.removeListener('goal_reached', this._afkWalkOnGoal); } catch (_) {}
+      this._afkWalkOnGoal = null;
+    }
     this._afkWalkPaused = false;
     try { if (this.bot && this.bot.pathfinder) this.bot.pathfinder.setGoal(null); } catch (_) {}
     try {
       if (this.bot) {
         this.bot.setControlState('forward', false);
         this.bot.setControlState('sprint', false);
+        this.bot.setControlState('sneak', false);
+        this.bot.setControlState('jump', false);
+        this.bot.setControlState('left', false);
+        this.bot.setControlState('right', false);
       }
     } catch (_) {}
     this.addLog('ok', `AFK arena: one-time walk finished — ${reason}.`);
@@ -1582,6 +1989,10 @@ class ManagedBot {
     if (patch.switchCommand !== undefined) this.switchCommand = patch.switchCommand;
     if (patch.switchDelay !== undefined) this.switchDelay = clamp(Number(patch.switchDelay) || 4000, 1000, 60000);
     if (patch.autoReconnect !== undefined) this.autoReconnect = !!patch.autoReconnect;
+    if (patch.autoAfk !== undefined) {
+      this.autoAfk = !!patch.autoAfk;
+      if (!this.autoAfk && this._autoAfkTimer) { clearTimeout(this._autoAfkTimer); this._autoAfkTimer = null; }
+    }
     if (patch.antiAfk !== undefined) {
       this.antiAfk = !!patch.antiAfk;
       if (!this.antiAfk) this._stopAfk();
@@ -1630,6 +2041,7 @@ function normalizeConfig(input, existing) {
     switchCommand,
     switchDelay: clamp(parseInt(src.switchDelay, 10) || 4000, 1000, 60000),
     autoReconnect: src.autoReconnect !== false,
+    autoAfk: src.autoAfk !== false,
     antiAfk: !!src.antiAfk,
     autoEat: src.autoEat !== false,
     reswitch: !!src.reswitch,
@@ -1884,6 +2296,91 @@ function broadcastGroups() {
   broadcast('stats', stats());
 }
 
+// ── sequential /tpa RO0MII queue ──
+// A RO0MII player chat starts it. Only bots that are currently in the
+// auto-learned AFK arena take part, in dashboard order.
+function tpaQueueBots() {
+  if (!manager) return [];
+  return Array.from(manager.bots.values()).filter((b) =>
+    b.wanted && b.status === 'online' && b.loggedIn && b.autoAfk && b._inAfkArena
+  );
+}
+
+function startTpaQueue(triggerBot) {
+  if (!manager || !manager.tpaQueue) return;
+  const q = manager.tpaQueue;
+  if (q.active) {
+    if (triggerBot) triggerBot.addLog('info', 'TPA queue already running — trigger ignored.');
+    return;
+  }
+  const bots = tpaQueueBots();
+  if (!bots.length) {
+    const msg = 'TPA queue: no AFK arena bots online.';
+    if (triggerBot) triggerBot.addLog('warn', msg);
+    log(msg);
+    return;
+  }
+  q.active = true;
+  q.target = TPA_PLAYER;
+  q.ids = bots.map((b) => b.id);
+  q.index = 0;
+  q.startedAt = now();
+  log(`TPA queue started by ${triggerBot ? triggerBot.name : 'panel'}: ${q.ids.length} bot(s) → /tpa ${q.target}`);
+  if (triggerBot) triggerBot.addLog('ok', `TPA queue started — ${q.ids.length} arena bot(s) will /tpa ${q.target} one by one.`);
+  runTpaQueueStep();
+}
+
+function runTpaQueueStep() {
+  const q = manager && manager.tpaQueue;
+  if (!q || !q.active) return;
+  if (q.index >= q.ids.length) {
+    q.active = false;
+    log(`TPA queue finished (${q.ids.length} bot(s)).`);
+    return;
+  }
+  const bot = manager.bots.get(q.ids[q.index]);
+  q.index += 1;
+  if (!bot || bot.status !== 'online' || !bot.loggedIn || !bot._inAfkArena) {
+    if (bot) bot.addLog('warn', 'TPA queue: skipped — not in AFK arena.');
+    clearTimeout(q.timer);
+    q.timer = setTimeout(runTpaQueueStep, 400);
+    return;
+  }
+  bot.addLog('ok', `TPA queue [${q.index}/${q.ids.length}]: sending /tpa ${q.target}.`);
+  try {
+    bot.sendChat(`/tpa ${q.target}`);
+  } catch (e) {
+    bot.addLog('err', `TPA queue: /tpa failed: ${e.message || e}`);
+  }
+  clearTimeout(q.timer);
+  q.timer = setTimeout(() => {
+    if (!q.active) return;
+    bot.addLog('warn', 'TPA queue: no acceptance seen — moving to the next bot.');
+    runTpaQueueStep();
+  }, 14000);
+}
+
+function onTpaQueueAccepted(bot) {
+  const q = manager && manager.tpaQueue;
+  if (!q || !q.active) return;
+  const current = manager.bots.get(q.ids[q.index - 1]);
+  if (!current || current !== bot) return;
+  clearTimeout(q.timer);
+  bot.addLog('ok', 'TPA queue: accepted — waiting 7s before the next bot.');
+  q.timer = setTimeout(runTpaQueueStep, 7000);
+}
+
+function stopTpaQueue(reason) {
+  const q = manager && manager.tpaQueue;
+  if (!q) return;
+  clearTimeout(q.timer);
+  q.timer = null;
+  if (q.active) log(`TPA queue stopped (${reason || 'manual'}).`);
+  q.active = false;
+  q.ids = [];
+  q.index = 0;
+}
+
 
 const sessions = new Map();
 const loginAttempts = new Map();
@@ -2131,7 +2628,31 @@ async function handleApi(req, res, url) {
 
   if (parts[1] === 'state' && method === 'GET') return json(res, 200, snapshot());
 
+  if (parts[1] === 'tpa-queue' && method === 'GET') {
+    const q = manager.tpaQueue;
+    return json(res, 200, {
+      active: q.active,
+      target: q.target,
+      total: q.ids.length,
+      current: q.index,
+      names: q.ids.map((id) => { const b = manager.bots.get(id); return b ? b.name : id; }),
+    });
+  }
+
+  if (parts[1] === 'tpa-queue' && method === 'POST') {
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+    if (body.action === 'start') startTpaQueue(null);
+    else if (body.action === 'stop') stopTpaQueue('panel');
+    const q = manager.tpaQueue;
+    return json(res, 200, { active: q.active, total: q.ids.length, current: q.index });
+  }
+
   if (parts[1] === 'proxies' && method === 'GET') return json(res, 200, proxyPool.status());
+
+  if (parts[1] === 'proxies' && parts[2] === 'good' && method === 'GET') {
+    return json(res, 200, { good: proxyPool.status().good });
+  }
 
   if (parts[1] === 'proxies' && method === 'POST') {
     let body;
@@ -2139,8 +2660,21 @@ async function handleApi(req, res, url) {
     if (body.enabled != null) proxyPool.setEnabled(!!body.enabled);
     if (body.webshare != null) proxyPool.setWebshare(!!body.webshare);
     if (body.maxPerIp != null) proxyPool.setMaxPerIp(body.maxPerIp);
-    if (body.reshuffle) proxyPool.reshuffle();
+    // Pin one bot to a known-good route without taking the fleet down. The
+    // bot picks up the pin on its next reconnect/restart.
+    if (body.pin && body.pin.botId && body.pin.key) {
+      proxyPool.release(body.pin.botId);
+      proxyPool.hold(body.pin.botId, { key: String(body.pin.key) });
+    }
+    if (body.reshuffle) {
+      proxyPool.reshuffle();
+      // Bots that are already connected keep their current route pinned;
+      // only disconnected/stale pins are cleared by the reshuffle.
+      manager.bots.forEach((b) => { if (b.connectedAt && b.proxy) proxyPool.hold(b.id, b.proxy); });
+    }
     if (body.refresh) proxyPool.refresh(true).catch(() => {});
+    if (body.healthCheck) proxyPool.healthCheck(true).catch(() => {});
+    if (body.resetHealth) proxyPool.resetHealth();
     if (body.apply) {
       // Rolling re-home: one bot at a time, seven seconds apart, so the fleet
       // never dips all at once.
@@ -2451,6 +2985,7 @@ async function handleApi(req, res, url) {
         if (action === 'start') { bot.desiredOn = true; bot.start(); }
         else if (action === 'stop') { bot.desiredOn = false; bot.stop('Stopped by user'); }
         else if (action === 'restart') { bot.desiredOn = true; bot.restart(); }
+        else if (action === 'walk') { bot.walkNow(!!body.debug); }
         else if (action === 'switch') { bot.switchNow(); }
         else if (action === 'login') { bot.loginNow(); }
         else if (action === 'chat') { bot.sendChat(String(body.message || '')); }
@@ -2543,6 +3078,7 @@ function boot() {
   manager = {
     bots: new Map(),
     groups: new Map(),
+    tpaQueue: { active: false, target: TPA_PLAYER, ids: [], index: 0, timer: null, startedAt: 0 },
     startedAt: now(),
   };
 
@@ -2566,7 +3102,7 @@ function boot() {
   if (!fs.existsSync(BOTS_FILE)) saveConfigs();
 
   const firstBot = Array.from(manager.bots.values())[0];
-  const poolReady = proxyPool.init({
+  proxyPool.init({
     dataDir: DATA_DIR,
     target: {
       host: process.env.PROXY_TARGET_HOST || (firstBot && firstBot.host) || '',
@@ -2588,24 +3124,25 @@ function boot() {
   server.listen(PORT, HOST, () => {
     log(`\x1b[32mMCBot Control\x1b[0m listening on \x1b[36mhttp://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}\x1b[0m`);
     log(`${manager.bots.size} bot(s) and ${manager.groups.size} group(s) loaded from ${BOTS_FILE}`);
-    // Restore bots that were running before the dashboard restarted. Give the
-    // cached proxy pool a few seconds to re-validate first, so the very first
-    // connection already egresses through a proxy (9s cap either way).
+    // init() loads the cached proxy list synchronously, so the first bot can
+    // use a real route immediately. Waiting for background re-validation only
+    // kept the whole fleet offline for 9–40s after every panel restart.
     const restore = Array.from(manager.bots.values()).filter((b) => b.desiredOn);
-    const kick = () => {
-      if (!restore.length) return;
+    if (restore.length) {
       log(`Restoring ${restore.length} bot(s)…`);
-      restore.forEach((b, i) => setTimeout(() => { if (b.desiredOn) b.start(); }, 1000 + i * 1500));
-    };
-    Promise.race([poolReady || Promise.resolve(), new Promise((r) => setTimeout(r, 9000))])
-      .then(kick).catch(kick);
+      // Give the previous process's game sessions time to close on the
+      // server. Starting at 600ms caused "This player is already online"
+      // kicks right after every panel restart.
+      restore.forEach((b, i) => setTimeout(() => { if (b.desiredOn) b.start(); }, 10000 + i * 1800));
+    }
   });
 
   const shutdown = (signal) => {
     log(`${signal} — shutting down…`);
+    stopTpaQueue('shutdown');
     try { server.close(); } catch (_) {}
     Array.from(manager.bots.values()).forEach((b) => { try { b.stop('Dashboard shutting down'); } catch (_) {} });
-    setTimeout(() => process.exit(0), 800);
+    setTimeout(() => process.exit(0), 3000);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));

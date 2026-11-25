@@ -9,7 +9,9 @@
  */
 
 function stripColor(s) {
-  return String(s == null ? '' : s).replace(/§[0-9a-fk-or]/gi, '');
+  // Modern servers also emit non-legacy `§` control codes (e.g. §\u0080), so
+  // drop the marker plus whatever single character follows it.
+  return String(s == null ? '' : s).replace(/§[\s\S]/g, '');
 }
 
 function chatText(reason) {

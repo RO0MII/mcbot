@@ -972,7 +972,10 @@ function pxLatencyClass(ms) { return ms <= 700 ? 'is-good' : ms <= 1500 ? 'is-ok
 function pxSig(p) {
   if (!p) return 'none';
   const ws = p.webshare || {};
-  return [p.enabled, p.total, p.assigned, p.uniqueIps, p.collisions, p.refreshing, p.maxPerIp, ws.enabled, ws.bots, p.proxies.map((x) => x.key + ':' + x.bots.length).join(',')].join('|');
+  const h = p.health || {};
+  return [p.enabled, p.total, p.assigned, p.uniqueIps, p.collisions, p.refreshing, p.maxPerIp, ws.enabled, ws.bots,
+    h.checking, h.lastCheck, h.healthy, h.quarantined, h.retired, h.proven,
+    p.proxies.map((x) => x.key + ':' + x.bots.length + ':' + (x.successes || 0) + ':' + (x.failStreak || 0) + ':' + (x.retired ? 1 : 0)).join(',')].join('|');
 }
 function pxStat(label, value, hint, cls) {
   return '<div class="pxstat' + (cls ? ' ' + cls : '') + '"><span>' + esc(label) + '</span><b>' + esc(value) + '</b><em>' + esc(hint) + '</em></div>';
@@ -987,7 +990,8 @@ function pxCardHtml(x, max) {
     + '<span class="pxpill ' + pxLatencyClass(x.latency) + '">' + x.latency + ' ms</span></header>'
     + '<div class="pxcard__load"><i style="width:' + pct + '%"></i><span>' + x.bots.length + ' / ' + max + ' bots</span></div>'
     + '<div class="pxcard__bots">' + bots + '</div>'
-    + '<footer class="pxcard__foot"><span>' + icon('shield') + (x.source === 'cached' ? 'cached' : 'verified') + '</span><span>' + x.fails + ' fails</span></footer>'
+    + '<footer class="pxcard__foot"><span>' + icon('shield') + (x.retired ? 'retired' : x.quarantineUntil > Date.now() ? 'cooling down' : x.successes ? 'proven ×' + x.successes : 'verified') + '</span>'
+    + '<span>' + (x.failStreak || 0) + ' fail streak</span></footer>'
     + '</article>';
 }
 function proxyBodyHtml(p) {
@@ -1006,7 +1010,13 @@ function proxyBodyHtml(p) {
     + pxStat('Routed bots', String(routed), 'pinned to an IP')
     + pxStat('Avg latency', avg ? avg + ' ms' : '—', 'on active routes')
     + pxStat('Max per IP', String(p.maxPerIp), 'bots per address')
-    + '</div>';
+    + '</div>'
+    + (p.health ? '<div class="pxstats pxstats--health">'
+      + pxStat('Health sweep', p.health.checking ? 'running…' : fmtDuration(Date.now() - (p.health.lastCheck || Date.now())) + ' ago', 'every 3 minutes', 'is-gold')
+      + pxStat('Proven', String(p.health.proven || 0), 'routes with confirmed wins', 'is-brand')
+      + pxStat('Cooling down', String(p.health.quarantined || 0), 'failed routes skipped')
+      + pxStat('Retired', String(p.health.retired || 0), 'repeated failures')
+      + '</div>' : '');
   const refreshNote = p.refreshing
     ? '<span class="pxspin"><i></i>testing routes…</span>'
     : '<span class="pxmeta">' + (p.lastRefresh ? 'swept ' + fmtDuration(Date.now() - p.lastRefresh) + ' ago' : 'not swept yet') + '</span>';
@@ -1019,6 +1029,7 @@ function proxyBodyHtml(p) {
     + '<div><b>Automatic proxy pool</b><span>Fetch · verify · pin · fail over</span></div></div>'
     + '<div class="pxcontrols__right">' + refreshNote
     + '<label class="pxmax">max / IP <input id="px-max" type="number" min="1" max="50" value="' + p.maxPerIp + '" inputmode="numeric" /></label>'
+    + '<button class="btn btn-ghost btn-sm" data-action="proxy-health">' + icon('zap') + '<span>Check now</span></button>'
     + '<button class="btn btn-ghost btn-sm" data-action="proxy-reshuffle">' + icon('restart') + '<span>Reshuffle</span></button>'
     + '</div></div>';
   const active = inUse.length
@@ -1363,6 +1374,7 @@ function handleAction(action, el) {
     if (action === 'clear-all') { openConfirm('Remove all bots', 'Delete all ' + state.bots.length + ' bots from the panel? This cannot be undone.', 'Remove all', () => api('/api/bots/clear', { method: 'POST', body: {} }).then((d) => afterRemoval((d.removed || 0) + ' bots removed.'))); return Promise.resolve(); }
     if (action === 'master') { toggleMaster(); return Promise.resolve(); }
     if (action === 'proxy-refresh') return proxyPost({ refresh: true }, 'Refreshing pool', 'Testing SOCKS5 routes — this takes about a minute.');
+    if (action === 'proxy-health') return proxyPost({ healthCheck: true }, 'Health check running', 'Failed routes are cooled down and skipped next time.');
     if (action === 'proxy-reshuffle') return proxyPost({ reshuffle: true }, 'Assignments cleared', 'Bots pick a new IP on their next reconnect.');
     if (action === 'proxy-toggle') { const on = !(state.proxy && state.proxy.enabled); return proxyPost({ enabled: on }, 'Proxy pool ' + (on ? 'on' : 'off'), on ? 'New connections route through the pool.' : 'Direct connections only from now on.'); }
     if (action === 'proxy-webshare') { const on = !(state.proxy && state.proxy.webshare && state.proxy.webshare.enabled); return proxyPost({ webshare: on }, 'Webshare ' + (on ? 'on' : 'off'), on ? 'Each bot opens its own rotating tunnel with a fresh IP.' : 'Bots fall back to the public SOCKS5 pool.'); }
@@ -1438,6 +1450,7 @@ function openFleetSetup() {
     + '<div class="modal-toggles">'
     + '<label class="check"><input type="checkbox" name="autoLogin" checked /> Auto-login</label>'
     + '<label class="check"><input type="checkbox" name="autoReconnect" checked /> Auto-reconnect</label>'
+    + '<label class="check"><input type="checkbox" name="autoAfk" checked /> Auto AFK arena</label>'
     + '<label class="check"><input type="checkbox" name="antiAfk" /> Anti-AFK</label>'
     + '<label class="check"><input type="checkbox" name="autoEat" checked /> Auto-eat</label>'
     + '<label class="check fleet__danger"><input type="checkbox" name="replace" checked /> Replace current fleet</label>'
@@ -1461,6 +1474,7 @@ async function submitFleetSetup(form) {
     password: String(fd.get('password') || 'Sandun123'),
     autoLogin: fd.get('autoLogin') === 'on',
     autoReconnect: fd.get('autoReconnect') === 'on',
+    autoAfk: fd.get('autoAfk') === 'on',
     antiAfk: fd.get('antiAfk') === 'on',
     autoEat: fd.get('autoEat') === 'on',
     replace: fd.get('replace') === 'on',
@@ -1501,7 +1515,8 @@ function openAddBot() {
     + '<div class="modal-toggles">'
     + '<label class="check"><input type="checkbox" name="autoLogin" checked /> Auto-login</label>'
     + '<label class="check"><input type="checkbox" name="autoReconnect" checked /> Auto-reconnect</label>'
-    + '<label class="check"><input type="checkbox" name="antiAfk" checked /> Anti-AFK</label>'
+    + '<label class="check"><input type="checkbox" name="autoAfk" checked /> Auto AFK arena</label>'
+    + '<label class="check"><input type="checkbox" name="antiAfk" /> Anti-AFK</label>'
     + '<label class="check"><input type="checkbox" name="autoEat" checked /> Auto-eat</label>'
     + '</div>'
     + '<p id="add-bot-error" class="login__error" hidden></p>'
@@ -1522,6 +1537,7 @@ async function submitAddBot(form) {
     password: String(fd.get('password') || 'Sandun123'),
     autoLogin: fd.get('autoLogin') === 'on',
     autoReconnect: fd.get('autoReconnect') === 'on',
+    autoAfk: fd.get('autoAfk') === 'on',
     antiAfk: fd.get('antiAfk') === 'on',
     autoEat: fd.get('autoEat') === 'on',
     desiredOn: true,
