@@ -20,3 +20,6 @@ Thumbs.db
 
 # Dashboard runtime data (contains bot passwords + caches)
 dashboard/data/
+
+# SDD isolated worktrees
+.worktrees/
