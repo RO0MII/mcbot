@@ -30,12 +30,15 @@ function classifyDisconnect(s) {
   // session. Switching proxy IPs cannot clear it; reconnecting too early just
   // burns every good route. Wait for the ghost session to expire instead.
   const ghostWait = Math.max(0, (Number(s.ghostSessionUntil) || 0) - now);
-  const handshakeFailed = !!(proxy && !connectedAt && ghostWait === 0);
   const protectedReason = !!(
     s.sawKick || s.lastKick || s.permanentBan ||
     (Number(s.bannedUntil) > now) ||
     (Number(s.rateLimitedUntil) > now)
   );
+  // A kick or rate limit during the handshake is the server rejecting the
+  // login, not a dead proxy. Charging it to the route burns good IPs every
+  // time the server restarts or throttles a staggered fleet reconnect.
+  const handshakeFailed = !!(proxy && !connectedAt && ghostWait === 0 && !protectedReason);
 
   const silentDrop = !!(
     proxy && s.wanted !== false && connectedAt && !handshakeFailed &&

@@ -96,6 +96,22 @@ test('a failed handshake is a cooldown route failure', () => {
   assert.equal(result.severity, 'cooldown');
 });
 
+test('a server rate limit during the handshake is not charged to the proxy route', () => {
+  const result = classifyDisconnect({
+    proxy,
+    wanted: true,
+    connectedAt: 0,
+    sawKick: true,
+    lastKick: "-- Papyrus -- (Slow Down) You're connecting too quickly. Please wait a few seconds and try again.",
+    rateLimitedUntil: 5000,
+    now: 2000,
+  });
+  assert.equal(result.handshakeFailed, false);
+  assert.equal(result.silentDrop, false);
+  assert.equal(result.routeFailed, false);
+  assert.equal(result.severity, null);
+});
+
 test('an auth-backend kick is a server hiccup, not a dead proxy route', () => {
   assert.equal(isTransientKick('Unable to connect to auth: An internal server connection error occurred.'), true);
   assert.equal(isTransientKick('An internal error occurred in your connection'), true);
