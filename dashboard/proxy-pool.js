@@ -7,7 +7,7 @@
  *    server the bots use, and keeps the ones that answer fast.
  *  · Hands each bot a sticky proxy (same IP across reconnects) and never puts
  *    more than `maxPerIp` bots behind one IP.
- *  · A 3-minute health sweep probes routes in the background. Successful
+ *  · A 1-minute health sweep probes routes in the background. Successful
  *    routes earn weight; timeouts/failures earn a cooldown and are skipped in
  *    later sweeps instead of being retried over and over. After repeated
  *    failures a route is retired from rotation entirely.
@@ -56,17 +56,18 @@ const DEFAULTS = {
 
 // Health model. A failed route is not retried on every sweep: it sits out the
 // next few sweeps, then gets one more chance. Repeated failures retire it.
-const HEALTH_CHECK_MS = 3 * 60 * 1000;
+const HEALTH_CHECK_MS = 60 * 1000;
 const HEALTH_TIMEOUT_MS = 2500;
 const HEALTH_CONCURRENCY = 20;
 const HEALTH_BATCH = 160;
 const QUARANTINE_STEPS = [3, 15, 60].map((m) => m * 60 * 1000);
 const RETIRE_AFTER = QUARANTINE_STEPS.length + 1;
 const FAIL_DEDUPE_MS = 30000;
-// A live-session failure deserves a long cooldown, but one hiccup must not
-// permanently exile a route that has carried bots for hours. The third
-// confirmed game failure is enough evidence to retire it.
-const GAME_COOLDOWNS = [10, 30].map((m) => m * 60 * 1000);
+// A live-session failure deserves a long cooldown, but three drops after
+// hours of clean uptime are not enough to exile a proven route. Keep it in
+// rotation after 10/30/60-minute cooldowns; only the fourth confirmed drop
+// retires it. Short-session history still retires weak routes on its own.
+const GAME_COOLDOWNS = [10, 30, 60].map((m) => m * 60 * 1000);
 const GAME_RETIRE_AFTER = GAME_COOLDOWNS.length + 1;
 
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
@@ -81,7 +82,8 @@ function healthCost(p) {
   const latency = clamp(Number(p.latency) || 3000, 50, 6000);
   const wins = clamp(Number(p.successes) || 0, 0, 30);
   const streak = clamp(Number(p.failStreak) || 0, 0, 10);
-  return latency / (1 + wins * 0.6) + streak * 220;
+  const probeStreak = clamp(Number(p.probeFailStreak) || 0, 0, 10);
+  return latency / (1 + wins * 0.6) + (streak + probeStreak) * 220;
 }
 
 /**
@@ -393,6 +395,8 @@ class ProxyPool {
               latency: Number(p.latency) || 999, okAt: Number(p.okAt) || 0,
               fails: Number(p.fails) || 0,
               failStreak: Number(p.failStreak) || 0,
+              probeFails: Number(p.probeFails) || 0,
+              probeFailStreak: Number(p.probeFailStreak) || 0,
               successes: Number(p.successes) || 0,
               sessions: Number(p.sessions) || 0,
               totalUptimeMs: Number(p.totalUptimeMs) || 0,
@@ -407,6 +411,7 @@ class ProxyPool {
               quarantineUntil: Number(p.quarantineUntil) || 0,
               retired: !!p.retired,
               lastFail: Number(p.lastFail) || 0,
+              lastProbeFail: Number(p.lastProbeFail) || 0,
               gameFailures: Number(p.gameFailures) || 0,
               source: p.source || 'cache', checked: false,
             });
@@ -430,7 +435,9 @@ class ProxyPool {
           .map((p) => ({
             host: p.host, port: p.port, protocol: p.protocol, region: p.region || '',
             latency: p.latency, okAt: p.okAt, source: p.source,
-            fails: p.fails || 0, failStreak: p.failStreak || 0, successes: p.successes || 0,
+            fails: p.fails || 0, failStreak: p.failStreak || 0,
+            probeFails: p.probeFails || 0, probeFailStreak: p.probeFailStreak || 0,
+            successes: p.successes || 0,
             sessions: p.sessions || 0, totalUptimeMs: p.totalUptimeMs || 0,
             lifetimeUptimeMs: p.lifetimeUptimeMs || p.totalUptimeMs || 0,
             bestUptimeMs: p.bestUptimeMs || 0, shortSessions: p.shortSessions || 0,
@@ -438,6 +445,7 @@ class ProxyPool {
             recent: Array.isArray(p.recent) ? p.recent.slice(-10) : [],
             checkedAt: p.checkedAt || 0, quarantineUntil: p.quarantineUntil || 0,
             retired: !!p.retired, lastFail: p.lastFail || 0,
+            lastProbeFail: p.lastProbeFail || 0,
             gameFailures: p.gameFailures || 0,
           }));
         const assignments = {};
@@ -623,7 +631,7 @@ class ProxyPool {
   }
 
   /* ── rolling health sweep ─────────────────────────────────────────────── */
-  /** Every three minutes: probe idle routes, reward the ones that answer,
+  /** Every minute: probe idle routes, reward the ones that answer,
    *  and park the ones that time out so later sweeps do not waste time on
    *  them. Bot connect/spawn callbacks feed the same score. */
   async healthCheck(force) {
@@ -654,11 +662,11 @@ class ProxyPool {
             // Endpoint probe only. Tunnel validation is left to real bot
             // joins so the health sweep cannot disturb live game sessions.
             const latency = await this.probe(p, HEALTH_TIMEOUT_MS);
-            this._healthOk(p, latency, true);
+            this.probeOk(p, latency);
             okCount++;
           } catch (e) {
             const msg = String((e && e.message) || e || '');
-            this._healthFail(p, /timeout|timed out|ETIMEDOUT/i.test(msg) ? 'timeout' : 'error');
+            this._healthFail(p, /timeout|timed out|ETIMEDOUT/i.test(msg) ? 'timeout' : 'error', 'probe');
             failCount++;
           }
         }
@@ -673,6 +681,29 @@ class ProxyPool {
     return this.status();
   }
 
+  _touchOk(p, latency, now) {
+    const sample = clamp(Number(latency) || 3000, 20, 12000);
+    p.latency = Math.round((Number(p.latency) || sample) * 0.65 + sample * 0.35);
+    p.checkedAt = now;
+    p.okAt = now;
+  }
+
+  /** Endpoint probes and real game failures are counted separately. A TCP
+   *  timeout is a flaky endpoint: the next good probe must be able to clear it.
+   *  A handshake/session failure is evidence the route cannot carry a bot and
+   *  must survive TCP-only probes, so probeOk never touches fails/failStreak. */
+  probeOk(proxy, latency) {
+    const key = (proxy && (proxy.ip || proxy.host)) + ':' + (proxy && proxy.port);
+    const p = this.alive.get(key);
+    if (!p) return;
+    p.probeFails = 0;
+    p.probeFailStreak = 0;
+    p.lastProbeFail = 0;
+    p.lastReason = '';
+    this._touchOk(p, latency, Date.now());
+  }
+
+  /** Only a real game spawn/arena success proves the whole route works. */
   _healthOk(proxy, latency, count) {
     const key = (proxy && (proxy.ip || proxy.host)) + ':' + (proxy && proxy.port);
     const p = this.alive.get(key);
@@ -683,19 +714,24 @@ class ProxyPool {
     }
     p.fails = 0;
     p.failStreak = 0;
+    p.probeFails = 0;
+    p.probeFailStreak = 0;
+    p.lastFail = 0;
+    p.lastProbeFail = 0;
     p.quarantineUntil = 0;
     // A retired route stays retired until an explicit reset. An endpoint can
     // answer TCP while still killing live game sessions, so a successful probe
     // must never resurrect it.
     p.lastReason = '';
-    const sample = clamp(Number(latency) || 3000, 20, 12000);
-    p.latency = Math.round((Number(p.latency) || sample) * 0.65 + sample * 0.35);
-    p.checkedAt = now;
-    p.okAt = now;
+    this._touchOk(p, latency, now);
   }
 
-  _healthFail(proxy, reason) {
+  _healthFail(proxy, reason, kind) {
     if (!proxy) return;
+    const isProbe = kind === 'probe';
+    const failKey = isProbe ? 'probeFails' : 'fails';
+    const streakKey = isProbe ? 'probeFailStreak' : 'failStreak';
+    const dedupeKey = isProbe ? 'lastProbeFail' : 'lastFail';
     const key = (proxy.ip || proxy.host) + ':' + proxy.port;
     let p = this.alive.get(key);
     if (!p) {
@@ -703,26 +739,29 @@ class ProxyPool {
         key, host: proxy.ip || proxy.host, port: Number(proxy.port),
         protocol: proxy.protocol === 'http' ? 'http' : 'socks5',
         region: proxy.region || '', latency: Number(proxy.latency) || 999,
-        source: proxy.source || 'user', fails: 0, failStreak: 0, successes: 0,
-        checkedAt: 0, quarantineUntil: 0, retired: false, lastFail: 0,
+        source: proxy.source || 'user', fails: 0, failStreak: 0,
+        probeFails: 0, probeFailStreak: 0, successes: 0,
+        checkedAt: 0, quarantineUntil: 0, retired: false,
+        lastFail: 0, lastProbeFail: 0,
       };
       this.alive.set(key, p);
     }
     const now = Date.now();
     // One route can report the same failed attempt from the dial and from the
     // handshake. Count it once, not twice.
-    if (now - (p.lastFail || 0) < FAIL_DEDUPE_MS) return;
-    p.lastFail = now;
+    if (now - (p[dedupeKey] || 0) < FAIL_DEDUPE_MS) return;
+    p[dedupeKey] = now;
     p.checkedAt = now;
-    p.fails = (p.fails || 0) + 1;
-    p.failStreak = (p.failStreak || 0) + 1;
+    p[failKey] = (p[failKey] || 0) + 1;
+    p[streakKey] = (p[streakKey] || 0) + 1;
     p.lastReason = reason || 'error';
-    if (p.failStreak >= RETIRE_AFTER) {
+    const streak = p[streakKey];
+    if (streak >= RETIRE_AFTER) {
       p.retired = true;
       p.quarantineUntil = 0;
-      this.log(`proxy health: retired ${key} after ${p.failStreak} failures`);
+      this.log(`proxy health: retired ${key} after ${streak} ${isProbe ? 'endpoint' : 'handshake'} failures`);
     } else {
-      const step = clamp(p.failStreak - 1, 0, QUARANTINE_STEPS.length - 1);
+      const step = clamp(streak - 1, 0, QUARANTINE_STEPS.length - 1);
       p.quarantineUntil = now + QUARANTINE_STEPS[step];
     }
     this._save();
@@ -749,7 +788,8 @@ class ProxyPool {
     if (cur) {
       cur.latency = Math.min(cur.latency || 99999, p.latency);
       cur.okAt = p.okAt || Date.now();
-      cur.fails = 0;
+      // Do not reset fails/failStreak here: discovery and cache revalidation
+      // only prove the endpoint answers, not that a bot can play through it.
       cur.checked = true;
       if (p.protocol) cur.protocol = p.protocol;
       if (p.region) cur.region = p.region;
@@ -766,18 +806,20 @@ class ProxyPool {
       region: p.region || '',
       username: p.username, password: p.password,
       latency: p.latency, okAt: p.okAt || Date.now(),
-      fails: 0, source: p.source || 'list', checked: true,
+      fails: 0, failStreak: 0, probeFails: 0, probeFailStreak: 0,
+      source: p.source || 'list', checked: true,
     };
     this.alive.set(key, rec);
     return rec;
   }
 
-  // Keep the pin table honest: no dead routes, no deleted bots, no duplicate
-  // pins, never more than maxPerIp bots on the same address. Stale pins were
-  // the reason removed bots kept holding IPs (and new bots shared the rest).
+  // Keep the pin table honest: no dead routes, no deleted bots, and never
+  // more than maxPerIp bots behind one address. A short pool makes bots wait
+  // for a free route; it does not license sharing an IP.
   _pruneAssignments() {
     let changed = false;
     const validIds = this._botIds ? new Set(this._botIds()) : null;
+    const cap = Math.max(1, Number(this.opts.maxPerIp) || 1);
     const usedKeys = new Set();
     const perIp = new Map();
     this.assignments.forEach((key, botId) => {
@@ -786,8 +828,9 @@ class ProxyPool {
       // A virtual pin is its own address: each bot gets a fresh tunnel/IP.
       const bucket = virtual ? key : (p && p.host);
       if (!bucket || (virtual && (!this.webshare.enabled || !this.webshare.username))
-          || (validIds && !validIds.has(botId)) || usedKeys.has(key)
-          || (perIp.get(bucket) || 0) >= this.opts.maxPerIp) {
+          || (validIds && !validIds.has(botId))
+          || (usedKeys.has(key) && cap <= 1)
+          || (perIp.get(bucket) || 0) >= cap) {
         this.assignments.delete(botId);
         changed = true;
         return;
@@ -844,39 +887,42 @@ class ProxyPool {
     }
     if (!this.alive.size) return null;
     const perIp = this._ipCounts(botId);
-    const candidates = Array.from(this.alive.values())
-      .filter((p) => !isQuarantined(p, now) && (perIp.get(p.host) || 0) < this.opts.maxPerIp);
-    if (!candidates.length) return null;
-    // The longest-lived routes win first: clean one-hour+ sessions, then
-    // recovering/trial routes, then curated bootstrap routes, then public
-    // Asian routes. Lifetime uptime breaks ties before latency, so a route
-    // that has stayed online for hours is preferred over a fast newcomer.
+    const healthy = Array.from(this.alive.values()).filter((p) => !isQuarantined(p, now));
+    if (!healthy.length) return null;
+    const free = healthy.filter((p) => (perIp.get(p.host) || 0) < this.opts.maxPerIp);
+    // Strict one-bot-per-IP: a drained pool must not put two bots behind one
+    // address. Velocity treats the second session as a rate-limit/backend
+    // error, so waiting for a free route is safer than sharing one.
+    if (!free.length) return null;
+    const candidates = free;
+    // The longest clean sessions win first: a route that stayed online for
+    // hours is a better bet than one that merely accumulated many short
+    // wins. Then recovering/trial routes, public Asian routes, and finally
+    // unproven curated additions. An endpoint that merely answers TCP is not
+    // proof a bot can play through it, so a freshly added list must not
+    // displace routes that already carried real sessions.
     const tierRank = (p) => {
       const tier = uptimeTier(p);
       if (tier === 'good') return 0;
       if (tier === 'trial') return 1;
-      if (p.source === 'user') return 2;
       if (p.region === 'asia') return 3;
+      if (p.source === 'user') return 4;
       return 4;
     };
-    const tiered = candidates.slice().sort((a, b) => tierRank(a) - tierRank(b)
-      || (b.totalUptimeMs || 0) - (a.totalUptimeMs || 0)
-      || healthCost(a) - healthCost(b));
+    const tiered = candidates.slice().sort((a, b) => {
+      return tierRank(a) - tierRank(b)
+        || (b.bestUptimeMs || 0) - (a.bestUptimeMs || 0)
+        || (b.totalUptimeMs || 0) - (a.totalUptimeMs || 0)
+        || healthCost(a) - healthCost(b);
+    });
     const bestRank = tierRank(tiered[0]);
     const tier = tiered.filter((p) => tierRank(p) === bestRank);
-    const free = tier.filter((p) => !perIp.has(p.host));
-    const pool = free.length ? free : tier;
-    const ranked = pool; // already tier-ranked, then lifetime-ranked
-    const best = ranked.slice(0, Math.min(12, ranked.length));
-    // Weighted random: a route with N confirmed wins is N+1 times as likely
-    // as an untested one, but no single fast route swallows the whole fleet.
-    const weights = best.map((p) => 1 + Math.min(20, p.successes || 0));
-    let roll = Math.random() * weights.reduce((a, b) => a + b, 0);
-    let chosen = best[best.length - 1];
-    for (let i = 0; i < best.length; i++) {
-      roll -= weights[i];
-      if (roll <= 0) { chosen = best[i]; break; }
-    }
+    const freeInTier = tier.filter((p) => !perIp.has(p.host));
+    const ranked = freeInTier.length ? freeInTier : tier;
+    // Give the bot the best available route, not a weighted lottery: a route
+    // with more probe successes but a worse session record must not win. Once
+    // this IP is pinned, the next bot gets the next best free one.
+    const chosen = ranked[0];
     this.assignments.set(botId, chosen.key);
     this._save();
     return this._public(chosen);
@@ -884,7 +930,7 @@ class ProxyPool {
 
   /** Cheap liveness probe: open a TCP socket to the proxy endpoint only.
    *  Never tunnel to the game server from background validation — hundreds of
-   *  tunnels in three minutes made Velocity drop active bot sessions. A real
+   *  tunnels in one minute made Velocity drop active bot sessions. A real
    *  bot join/spawn is the only proof a route can actually reach the server. */
   probe(proxy, timeoutMs) {
     const host = proxy && (proxy.ip || proxy.host);
@@ -964,8 +1010,8 @@ class ProxyPool {
   }
 
   /** A route that kills an already-connected session is worse than one that
-   *  times out during setup, but a single Velocity hiccup is not proof the IP
-   *  is dead. Cool it down twice, then retire it on the third confirmed drop. */
+   *  times out during setup, but a few Velocity hiccups are not proof the IP
+   *  is dead. Cool it down through 10/30/60 minutes before retiring it. */
   reportGameFailure(proxy) {
     if (!proxy) return;
     const key = (proxy.ip || proxy.host) + ':' + proxy.port;
@@ -1107,6 +1153,8 @@ class ProxyPool {
           okAt: p.okAt,
           fails: p.fails || 0,
           failStreak: p.failStreak || 0,
+          probeFails: p.probeFails || 0,
+          probeFailStreak: p.probeFailStreak || 0,
           successes: p.successes || 0,
           ...uptime,
           checkedAt: p.checkedAt || 0,
@@ -1118,7 +1166,8 @@ class ProxyPool {
           bots: botsByKey.get(p.key) || [],
         };
       });
-    good.sort((a, b) => b.lifetimeUptimeSec - a.lifetimeUptimeSec);
+    good.sort((a, b) => b.bestUptimeSec - a.bestUptimeSec
+      || b.lifetimeUptimeSec - a.lifetimeUptimeSec);
     return {
       enabled: this.opts.enabled,
       maxPerIp: this.opts.maxPerIp,

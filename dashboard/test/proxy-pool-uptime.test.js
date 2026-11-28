@@ -144,17 +144,23 @@ test('an unproven route is released after a handshake failure', () => {
   }
 });
 
-test('a single game failure cools a route; the third one retires it', () => {
+test('a long-lived route is cooled, not retired, after three game failures', () => {
   const restore = withCleanPool();
   try {
-    seed('game.test:1', { bestUptimeMs: 2 * HOUR, totalUptimeMs: 5 * HOUR, shortSessions: 0 });
+    const key = 'game.test:1';
+    seed(key, { bestUptimeMs: 2 * HOUR, totalUptimeMs: 5 * HOUR, shortSessions: 0 });
     proxyPool.reportGameFailure({ ip: 'game.test', port: 1 });
-    assert.equal(proxyPool.alive.get('game.test:1').retired, false);
-    assert.ok(proxyPool.alive.get('game.test:1').quarantineUntil > Date.now());
+    assert.equal(proxyPool.alive.get(key).retired, false);
+    assert.ok(proxyPool.alive.get(key).quarantineUntil > Date.now());
     proxyPool.reportGameFailure({ ip: 'game.test', port: 1 });
-    assert.equal(proxyPool.alive.get('game.test:1').retired, false);
+    assert.equal(proxyPool.alive.get(key).retired, false);
     proxyPool.reportGameFailure({ ip: 'game.test', port: 1 });
-    assert.equal(proxyPool.alive.get('game.test:1').retired, true);
+    assert.equal(proxyPool.alive.get(key).retired, false);
+    // Once the cooldown expires the hours-old route is still worth a bot.
+    proxyPool.alive.get(key).quarantineUntil = 0;
+    assert.equal(proxyPool.pick('b-proven').key, key);
+    proxyPool.reportGameFailure({ ip: 'game.test', port: 1 });
+    assert.equal(proxyPool.alive.get(key).retired, true);
   } finally {
     restore();
   }
@@ -200,6 +206,177 @@ test('uptime fields survive a save/load round trip', async () => {
   } finally {
     if (proxyPool._saveTimer) { clearTimeout(proxyPool._saveTimer); proxyPool._saveTimer = null; }
     try { fs.unlinkSync(tmp); } catch (_) {}
+    restore();
+  }
+});
+
+test('a free healthy route is still preferred over a shared one', () => {
+  const restore = withCleanPool();
+  try {
+    seed('taken.test:1', { latency: 20 });
+    seed('free.test:2', { latency: 900 });
+    proxyPool.assignments.set('bot-a', 'taken.test:1');
+    assert.equal(proxyPool.pick('bot-b').key, 'free.test:2');
+  } finally {
+    restore();
+  }
+});
+
+test('unproven curated routes are tried only after discovered routes', () => {
+  const restore = withCleanPool();
+  try {
+    seed('newuser.test:1', { source: 'user', latency: 10 });
+    seed('discovered.test:2', { source: 'list', region: 'asia', latency: 300 });
+    assert.equal(proxyPool.pick('b-rank').key, 'discovered.test:2');
+  } finally {
+    restore();
+  }
+});
+
+test('one IP is never given to a second bot when every route is assigned', () => {
+  const restore = withCleanPool();
+  try {
+    seed('only.test:1', { latency: 20 });
+    proxyPool.assignments.set('bot-a', 'only.test:1');
+    assert.equal(proxyPool.pick('bot-b'), null);
+    assert.equal(proxyPool.assignments.has('bot-b'), false);
+    // Cleanup must not invent a shared slot either.
+    proxyPool.assignments.set('bot-b', 'only.test:1');
+    proxyPool._pruneAssignments();
+    assert.equal(proxyPool.assignments.has('bot-b'), false);
+    assert.equal(proxyPool.assignments.get('bot-a'), 'only.test:1');
+  } finally {
+    restore();
+  }
+});
+
+test('an endpoint probe does not erase handshake failure history', () => {
+  const restore = withCleanPool();
+  try {
+    const key = 'probe.test:1';
+    seed(key, { failStreak: 2, fails: 2, quarantineUntil: Date.now() + 60000 });
+    proxyPool.probeOk({ ip: 'probe.test', port: 1, latency: 80 }, 80);
+    const p = proxyPool.alive.get(key);
+    assert.equal(p.failStreak, 2);
+    assert.equal(p.fails, 2);
+    assert.ok(p.quarantineUntil > Date.now());
+    assert.ok(p.latency > 20);
+  } finally {
+    restore();
+  }
+});
+
+test('a real game success clears failure history', () => {
+  const restore = withCleanPool();
+  try {
+    const key = 'win.test:1';
+    seed(key, { failStreak: 2, fails: 2, quarantineUntil: Date.now() + 60000, okAt: Date.now() - 60000 });
+    proxyPool.reportOk({ ip: 'win.test', port: 1, latency: 90 });
+    const p = proxyPool.alive.get(key);
+    assert.equal(p.failStreak, 0);
+    assert.equal(p.fails, 0);
+    assert.equal(p.quarantineUntil, 0);
+    assert.ok(p.successes >= 1);
+  } finally {
+    restore();
+  }
+});
+
+test('refreshing a cached route keeps its failure history', () => {
+  const restore = withCleanPool();
+  try {
+    const key = 'upsert.test:1';
+    seed(key, { failStreak: 3, fails: 3, quarantineUntil: Date.now() + 60000 });
+    proxyPool._upsert({ host: 'upsert.test', port: 1, protocol: 'socks5', latency: 30, okAt: Date.now() }, true);
+    const p = proxyPool.alive.get(key);
+    assert.equal(p.failStreak, 3);
+    assert.equal(p.fails, 3);
+    assert.ok(p.quarantineUntil > Date.now());
+  } finally {
+    restore();
+  }
+});
+
+test('endpoint probes cannot keep a repeatedly failing route alive forever', () => {
+  const restore = withCleanPool();
+  try {
+    const key = 'zombie.test:1';
+    seed(key, { bestUptimeMs: 2 * HOUR });
+    for (let i = 0; i < 4; i++) {
+      proxyPool.alive.get(key).lastFail = 0; // count each distinct attempt
+      proxyPool.reportFailure({ ip: 'zombie.test', port: 1 });
+      proxyPool.probeOk({ ip: 'zombie.test', port: 1, latency: 70 }, 70);
+    }
+    assert.equal(proxyPool.alive.get(key).retired, true);
+  } finally {
+    restore();
+  }
+});
+
+test('the health sweep runs once a minute', () => {
+  const restore = withCleanPool();
+  const savedCheck = proxyPool.lastHealthCheck;
+  try {
+    proxyPool.lastHealthCheck = 1000000;
+    const health = proxyPool.status().health;
+    assert.equal(health.intervalMs, 60000);
+    assert.equal(health.nextCheck, 1060000);
+  } finally {
+    proxyPool.lastHealthCheck = savedCheck;
+    restore();
+  }
+});
+
+test('a reconnecting bot gets the route with the best single-session uptime', () => {
+  const restore = withCleanPool();
+  const savedRandom = Math.random;
+  try {
+    seed('long-total.test:1', {
+      latency: 10, bestUptimeMs: 70 * 60 * 1000,
+      totalUptimeMs: 20 * HOUR, shortSessions: 0,
+    });
+    seed('best-session.test:2', {
+      latency: 900, bestUptimeMs: 5 * HOUR,
+      totalUptimeMs: 6 * HOUR, shortSessions: 0,
+    });
+    Math.random = () => 0;
+    assert.equal(proxyPool.pick('b-best').key, 'best-session.test:2');
+  } finally {
+    Math.random = savedRandom;
+    restore();
+  }
+});
+
+test('status().good ranks the longest clean session above lifetime uptime', () => {
+  const restore = withCleanPool();
+  try {
+    seed('long-total.test:1', {
+      bestUptimeMs: 90 * 60 * 1000, totalUptimeMs: 10 * HOUR, shortSessions: 0,
+    });
+    seed('best-session.test:2', {
+      bestUptimeMs: 5 * HOUR, totalUptimeMs: 6 * HOUR, shortSessions: 0,
+    });
+    assert.equal(proxyPool.status().good[0].key, 'best-session.test:2');
+  } finally {
+    restore();
+  }
+});
+
+test('a good endpoint probe lets a timed-out route back into rotation', () => {
+  const restore = withCleanPool();
+  try {
+    const key = 'recover.test:1';
+    seed(key, { latency: 100 });
+    proxyPool._healthFail({ ip: 'recover.test', port: 1 }, 'timeout', 'probe');
+    const cooled = proxyPool.alive.get(key);
+    assert.ok(cooled.quarantineUntil > Date.now());
+    // Quarantine has expired and the same endpoint answers this sweep.
+    cooled.quarantineUntil = 0;
+    cooled.lastProbeFail = 0;
+    proxyPool.probeOk({ ip: 'recover.test', port: 1, latency: 60 }, 60);
+    assert.equal(proxyPool.alive.get(key).probeFailStreak, 0);
+    assert.equal(proxyPool.pick('b-recover').key, key);
+  } finally {
     restore();
   }
 });

@@ -726,20 +726,41 @@ async function runArenaWalk(bot, options = {}) {
     let grid = null;
     let target = null;
     let route = null;
+    const forced = opts.target && Number.isFinite(Number(opts.target.x)) && Number.isFinite(Number(opts.target.z))
+      ? { x: Number(opts.target.x), z: Number(opts.target.z) }
+      : null;
     if (opts.steadyDrive) {
-      const heading = chooseHeading(bot, origin, opts);
-      if (!heading || heading.clear < opts.minDistance - 0.1) {
-        push(`no straight ${opts.minDistance}-block opening (best ${heading ? heading.clear.toFixed(1) : 0})`);
+      let heading = null;
+      let want = 0;
+      if (forced) {
+        const yaw = yawTo(origin.x, origin.z, forced.x, forced.z);
+        want = Math.hypot(forced.x - origin.x, forced.z - origin.z);
+        const clear = headingClear(bot, origin, yaw, Math.min(want, opts.maxDistance));
+        heading = { yaw, clear, off: 0, score: 0 };
+        push(`saved spot ${Math.floor(forced.x)},${Math.floor(forced.z)} — clear ${clear.toFixed(1)} of ${want.toFixed(1)} blocks`);
+      } else {
+        heading = chooseHeading(bot, origin, opts);
+      }
+      const minDist = forced ? Math.min(opts.minDistance, want) : opts.minDistance;
+      if (!heading || heading.clear < minDist - 0.1) {
+        push(`no straight ${minDist.toFixed(1)}-block opening (best ${heading ? heading.clear.toFixed(1) : 0})`);
         return early(false, 'no clear opening');
       }
       opts.fixedYaw = heading.yaw;
-      opts.walkDistance = Math.min(heading.clear, opts.maxDistance);
-      push(`one random heading ${heading.yaw.toFixed(2)} — clear ${heading.clear.toFixed(1)} blocks; no turns after this`);
-      target = {
-        x: Math.floor(origin.x - Math.sin(heading.yaw) * opts.walkDistance + 1e-9),
-        y: Math.floor(origin.y),
-        z: Math.floor(origin.z - Math.cos(heading.yaw) * opts.walkDistance + 1e-9),
-      };
+      opts.walkDistance = forced
+        ? Math.min(heading.clear, want, opts.maxDistance)
+        : Math.min(heading.clear, opts.maxDistance);
+      if (forced) {
+        push(`returning to saved spot ${Math.floor(forced.x)},${Math.floor(forced.z)} with yaw ${heading.yaw.toFixed(2)}; no turns after this`);
+        target = { x: Math.floor(forced.x), y: Math.floor(origin.y), z: Math.floor(forced.z) };
+      } else {
+        push(`one random heading ${heading.yaw.toFixed(2)} — clear ${heading.clear.toFixed(1)} blocks; no turns after this`);
+        target = {
+          x: Math.floor(origin.x - Math.sin(heading.yaw) * opts.walkDistance + 1e-9),
+          y: Math.floor(origin.y),
+          z: Math.floor(origin.z - Math.cos(heading.yaw) * opts.walkDistance + 1e-9),
+        };
+      }
       route = [target];
     } else {
       grid = readGrid(bot, origin, opts.radius);
@@ -749,14 +770,26 @@ async function runArenaWalk(bot, options = {}) {
         return early(false, 'spawn cell blocked');
       }
       const reach = bfsReachable(grid, startCell, opts.radius * 2);
-      const pick = chooseTarget(grid, reach, startCell, rng, opts);
-      if (!pick) {
-        push('no reachable cell 5–10 blocks away');
-        return early(false, 'no reachable target');
+      if (forced) {
+        const cell = grid.get(Math.floor(forced.x), Math.floor(forced.z));
+        if (cell && reach.has(cell.x + ',' + cell.z)) {
+          target = cell;
+          route = simplify(grid, aStar(grid, startCell, target));
+          push(`grid ${grid.cells.size} cells — returning to saved spot ${target.x},${target.z} route ${route ? route.length : 0}`);
+        } else {
+          push(`saved spot ${Math.floor(forced.x)},${Math.floor(forced.z)} unreachable — choosing a random target`);
+        }
       }
-      target = pick.cell;
-      route = simplify(grid, aStar(grid, startCell, target));
-      push(`grid ${grid.cells.size} cells — target ${target.x},${target.z} d=${pick.dist.toFixed(1)} route ${route ? route.length : 0}`);
+      if (!target) {
+        const pick = chooseTarget(grid, reach, startCell, rng, opts);
+        if (!pick) {
+          push('no reachable cell 5–10 blocks away');
+          return early(false, 'no reachable target');
+        }
+        target = pick.cell;
+        route = simplify(grid, aStar(grid, startCell, target));
+        push(`grid ${grid.cells.size} cells — target ${target.x},${target.z} d=${pick.dist.toFixed(1)} route ${route ? route.length : 0}`);
+      }
     }
 
     // 3. One walk. A re-route keeps the same deadline and never starts a

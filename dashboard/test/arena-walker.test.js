@@ -118,3 +118,21 @@ test('a cancelled walk stops early and releases the controls', async () => {
   assert.ok(result.ms < 800, `cancelled walk took ${result.ms}ms`);
   assert.ok(released.includes('forward'), 'forward must be released');
 });
+
+test('a forced target makes the walk return to the saved spot', async () => {
+  const bot = fakeArena();
+  bot.look = () => {};
+  bot.setControlState = () => {};
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+  const result = await runArenaWalk(bot, {
+    target: { x: 0, y: 65, z: 6 },
+    settleMs: 0,
+    walkTimeoutMs: 2000,
+    signal: controller.signal,
+  });
+  assert.equal(result.reason, 'cancelled');
+  assert.equal(result.target.x, 0, 'walk must aim at the saved X');
+  assert.equal(result.target.z, 6, 'walk must aim at the saved Z');
+  assert.ok(result.trace.some((t) => /saved spot/.test(t)), 'trace must name the saved spot');
+});

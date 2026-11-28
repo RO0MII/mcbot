@@ -66,30 +66,25 @@ const proxyPool = require('./proxy-pool');
 const { classifyDisconnect, isTransientKick } = require('./route-outcome');
 const { parseBanDuration } = require('./ban-duration');
 const { runArenaWalk } = require('./arena-walker');
+const { chooseAfkAction } = require('./afk-decision');
+const { routeRetryDelay } = require('./reconnect-delay');
+const {
+  isTpaTeleportProof,
+  isTpaAcceptance,
+  isTpaQueueTrigger,
+  isTpaQueueBot,
+  tpaCommandText,
+  savedSpotNeedsTpa,
+} = require('./tpa-place');
+const connectGate = require('./connect-gate');
 const { Vec3 } = require('vec3');
 
 // Light bot profile: fewer plugins, fewer chunks, lower RAM/CPU per bot.
 const LIGHT_OPTIONS = require('./bot-options');
 
 // Velocity rate-limits joins per IP ("Papyrus — You're connecting too quickly").
-// Ten bots retrying together therefore never get in. This gate spaces every
-// connection attempt across the whole fleet.
-const CONNECT_GAP_MS = 1500;
-let gateNextAt = 0;
-let gateBlockedUntil = 0;
-function takeConnectSlot() {
-  const t = Date.now();
-  // Every bot egresses from its own proxy IP, so a 3.2s global gap only made
-  // the whole fleet look offline for ~40s after a restart. Keep a short
-  // stagger for server politeness, but never push it far into the future.
-  const spacing = Math.min(gateNextAt, t + 20000);
-  const at = Math.max(t, spacing, gateBlockedUntil);
-  gateNextAt = at + CONNECT_GAP_MS + Math.floor(Math.random() * 700);
-  return at - t;
-}
-function blockConnectGate(ms) {
-  gateBlockedUntil = Math.max(gateBlockedUntil, Date.now() + ms);
-}
+// The shared connect gate lives in ./connect-gate so it can be tested, and so
+// every queued bot re-takes a fresh slot when its timer actually fires.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Settings
@@ -324,7 +319,7 @@ const TPA_REQUEST_RE = new RegExp(
 );
 const TPA_GLASS_RE = /(?:green|lime)/i;
 const TPA_CONFIRM_RE = /\b(?:confirm|accept|ok|yes|agree)\b|[✓✔]/i;
-const TPA_SPEAKER_RE = new RegExp('^\\s*<?' + TPA_NAME + '\\s*(?::|>)', 'i');
+const TPA_SPEAKER_RE = new RegExp('^\\s*(?:<\\s*)?' + TPA_NAME + '\\s*(?:>|:)', 'i');
 // The server writes labels in Unicode small caps, e.g. "ᴄᴏɴꜰɪʀᴍ".
 // Normalise those glyphs before matching GUI item names and titles.
 const TPA_FANCY = {
@@ -446,9 +441,22 @@ class ManagedBot {
     this._autoAfkAttempts = 0;
     this._autoAfkSent = false;
     this._inAfkArena = false;
-    // Auto-learned AFK arena home; used to detect a teleport away from it.
-    this._arenaHome = null;
+    // Auto-learned AFK spot. A spot learned from a /tpa landing is marked so
+    // reconnects wait for RO0MII's "onna" instead of sending /afk or /tpa by
+    // themselves (/afk returns to spawn, and /tpa must be user-triggered).
+    const h = cfg.arenaHome;
+    this._arenaHome = h && Number.isFinite(h.x) && Number.isFinite(h.y) && Number.isFinite(h.z)
+      ? { x: h.x, y: h.y, z: h.z } : null;
+    this._arenaHomePlaced = !!cfg.arenaHomePlaced;
     this._arenaCheckAt = 0;
+    this._tpaPlaceUntil = 0;
+    this._tpaPlaceTimer = null;
+    this._tpaPlacePending = false;
+    this._tpaPlaceFrom = null;
+    this._tpaPlaceIsRestore = false;
+    this._tpaRestoreTimer = null;
+    this._awaitingTpaRestore = false;
+    this._tpaRestoreLoggedAt = 0;
 
     this.addLog('info', `Bot created for ${this.host}:${this.port}`);
   }
@@ -555,6 +563,7 @@ class ManagedBot {
       position: this.position,
       afkArena: !!this._inAfkArena,
       arenaHome: this._arenaHome,
+      arenaHomePlaced: !!this._arenaHomePlaced,
       ping: this.ping,
       proxy: this.proxy,
       proxySince: this.proxySince,
@@ -601,6 +610,8 @@ class ManagedBot {
       desiredOn: this.desiredOn,
       groupIds: this.groupIds.slice(),
       createdAt: this.createdAt,
+      arenaHome: this._arenaHome,
+      arenaHomePlaced: !!this._arenaHomePlaced,
     };
   }
 
@@ -642,6 +653,8 @@ class ManagedBot {
     if (this._aliveTimer) { clearInterval(this._aliveTimer); this._aliveTimer = null; }
     if (this._arenaTimer) { clearInterval(this._arenaTimer); this._arenaTimer = null; }
     if (this._worldTimer) { clearInterval(this._worldTimer); this._worldTimer = null; }
+    this._clearTpaPlaceTimer();
+    this._stopTpaRestore();
   }
   _startAliveWatch() {
     if (this._aliveTimer) clearInterval(this._aliveTimer);
@@ -676,15 +689,12 @@ class ManagedBot {
   // A TPA teleport moves the bot far away; reconnecting gives it a fresh /afk.
   _checkArenaPosition() {
     if (!this.autoAfk || !this._inAfkArena || !this._arenaHome) return;
+    if (this._tpaPlacePending || this._tpaPlaceUntil > now() || this._tpaRestoreTimer) return;
     if (!this.bot || !this.bot.entity || !this.bot.entity.position) return;
     if (now() - this._arenaCheckAt < 3000) return;
     this._arenaCheckAt = now();
+    if (this._inArenaRange()) return;
     const p = this.bot.entity.position;
-    const h = this._arenaHome;
-    const dx = Math.abs(p.x - h.x);
-    const dy = Math.abs(p.y - h.y);
-    const dz = Math.abs(p.z - h.z);
-    if (dx <= 20 && dz <= 20 && dy <= 10) return;
     this.addLog('warn', `AFK arena: out of range at (${Math.round(p.x)}, ${Math.round(p.y)}, ${Math.round(p.z)}) — reconnecting and sending /afk.`);
     this._arenaHome = null;
     this._inAfkArena = false;
@@ -720,27 +730,95 @@ class ManagedBot {
     if (this._afkTimer) { clearInterval(this._afkTimer); this._afkTimer = null; }
     if (this._autoAfkTimer) { clearTimeout(this._autoAfkTimer); this._autoAfkTimer = null; }
     if (this._autoAfkRetryTimer) { clearInterval(this._autoAfkRetryTimer); this._autoAfkRetryTimer = null; }
+    this._stopTpaRestore();
+    this._clearTpaPlaceTimer();
+    this._tpaPlacePending = false;
     this._cancelAfkSequence();
   }
 
   /** Wait for auto-login, then keep sending /afk until the arena is reached.
    *  The first attempt is staggered per bot: a fleet-wide burst makes the
    *  server drop the AFK GUI for most of the bots. */
+  // Spawn and arena share the same coordinates. After a reconnect, stay put
+  // when the bot is already at its learned arena home; only send /afk when it
+  // is somewhere else.
+  // "Already there" must mean the saved spot itself. A 20-block arena radius
+  // also contains spawn, so a reconnect at spawn was wrongly treated as being
+  // at the user's chosen spot and skipped /afk.
+  _atLearnedArena() {
+    if (!this._arenaHome || !this.bot || !this.bot.entity || !this.bot.entity.position) return false;
+    const p = this.bot.entity.position;
+    const h = this._arenaHome;
+    return Math.hypot(p.x - h.x, p.z - h.z) <= 3 && Math.abs(p.y - h.y) <= 2;
+  }
+
+  // Loose bounds answer a different question: has the bot been teleported out
+  // of the arena entirely? Small walks inside the arena must not reconnect it.
+  _inArenaRange() {
+    if (!this._arenaHome || !this.bot || !this.bot.entity || !this.bot.entity.position) return false;
+    const p = this.bot.entity.position;
+    const h = this._arenaHome;
+    return Math.abs(p.x - h.x) <= 20 && Math.abs(p.z - h.z) <= 20 && Math.abs(p.y - h.y) <= 10;
+  }
+
+  _stayAtLearnedArena() {
+    this._inAfkArena = true;
+    this._autoAfkSent = true;
+    if (this.status === 'online') this.setStatus('online', 'AFK arena');
+    this.addLog('ok', 'AFK: already at saved arena coordinates — skipping /afk.');
+  }
+
   _scheduleAutoAfk() {
     if (!this.autoAfk || this._inAfkArena || this._autoAfkSent || this._autoAfkTimer) return;
+    // The spawn event arrives before login and reports the lobby position,
+    // so every decision is deferred until login and the real position settle.
+    this._afkSpawnAt = now();
     const seed = Array.from(this.id).reduce((a, c) => a + c.charCodeAt(0), 0) % 9000;
     const deadline = now() + 90000;
     const tick = () => {
-      if (!this.wanted || !this.bot || !this.bot.player || this._inAfkArena || this._autoAfkSent) return;
+      if (!this.wanted || !this.bot) {
+        this._autoAfkTimer = null;
+        return;
+      }
+      if (!this.bot.player) {
+        this._autoAfkTimer = setTimeout(tick, 1500);
+        return;
+      }
       if (now() > deadline) {
+        this._autoAfkTimer = null;
         this.addLog('warn', 'Auto AFK: login did not complete in time — skipping /afk.');
         return;
       }
-      if (this.autoLogin && !this.loggedIn) {
+      const settled = now() - this._afkSpawnAt >= 3000
+        && (!this.autoLogin || now() - (this._loggedInAt || 0) >= 1000);
+      const action = chooseAfkAction({
+        wanted: this.wanted,
+        autoLogin: this.autoLogin,
+        loggedIn: this.loggedIn,
+        settled,
+        inAfkArena: this._inAfkArena,
+        autoAfkSent: this._autoAfkSent,
+        home: this._arenaHome,
+        placed: this._arenaHomePlaced,
+        pos: this.bot.entity ? this.bot.entity.position : null,
+      });
+      if (action === 'wait') {
         this._autoAfkTimer = setTimeout(tick, 1500);
         return;
       }
       this._autoAfkTimer = null;
+      if (action === 'none') return;
+      if (action === 'stay') {
+        this._stayAtLearnedArena();
+        return;
+      }
+      // A user-placed spot was reached by TPA, not by the AFK walk. /afk would
+      // send the bot to spawn, and /tpa is only allowed when RO0MII says
+      // "onna", so the bot waits for that command instead.
+      if (action === 'restore') {
+        this._startTpaRestore();
+        return;
+      }
       this._autoAfkSent = true;
       this._autoAfkAttempts = 0;
       this._sendAutoAfk();
@@ -857,28 +935,10 @@ class ManagedBot {
    * there is no direct fallback, so the host's real IP is never exposed. A
    * dead route is retried with a fresh proxy instead.
    */
-  _connect(slotTaken) {
+  _connect() {
     if (!this.wanted) return;
     if (this._gateTimer) { clearTimeout(this._gateTimer); this._gateTimer = null; }
-    if (!slotTaken) {
-      const wait = takeConnectSlot();
-      if (wait > 0) {
-        this.setStatus('connecting', 'Waiting for a connect slot…');
-        this._gateTimer = setTimeout(() => {
-          this._gateTimer = null;
-          if (this.wanted) this._connect(true);
-        }, wait);
-        return;
-      }
-    }
     const gen = (this._gen = (this._gen || 0) + 1);
-    // Webshare tunnels dial this bot's own host:port, so the public pool's
-    // validation target is irrelevant while the rotating provider is active.
-    if (!proxyPool.webshareActive() && this.host && proxyPool.target
-        && proxyPool.target.host !== this.host) {
-      this.addLog('info', `Verifying proxy routes against ${this.host}…`);
-      proxyPool.setTarget(this.host, this.port);
-    }
     // No direct path: local/private targets are no longer an exception, so a
     // bot can never dial out with the host's real IP.
     const px = proxyPool.pick(this.id, this.name);
@@ -888,6 +948,28 @@ class ManagedBot {
       this._scheduleReconnect(5000);
       return;
     }
+    // The throttle is per egress IP. Two bots on different routes may dial
+    // together; two bots sharing one route must be spaced out. Check first,
+    // then reserve only when ready, so a server block arriving mid-wait is
+    // still honoured without a waiting bot consuming extra slots.
+    const gateKey = px.virtual ? `webshare:${this.id}` : px.ip;
+    let wait = connectGate.waitFor(gateKey);
+    if (wait === 0) wait = connectGate.take(gateKey);
+    if (wait > 0) {
+      this.setStatus('connecting', 'Waiting for a connect slot…');
+      this._gateTimer = setTimeout(() => {
+        this._gateTimer = null;
+        if (this.wanted) this._connect();
+      }, wait);
+      return;
+    }
+    // Webshare tunnels dial this bot's own host:port, so the public pool's
+    // validation target is irrelevant while the rotating provider is active.
+    if (!proxyPool.webshareActive() && this.host && proxyPool.target
+        && proxyPool.target.host !== this.host) {
+      this.addLog('info', `Verifying proxy routes against ${this.host}…`);
+      proxyPool.setTarget(this.host, this.port);
+    }
 
     const routeLabel = px.virtual ? 'Webshare tunnel' : `${px.ip}:${px.port}`;
     this.setStatus('connecting', px.virtual ? 'Opening Webshare tunnel…' : `Opening proxy ${px.ip}…`);
@@ -896,7 +978,9 @@ class ManagedBot {
       : `Routing through ${routeLabel} (${px.latency} ms)…`);
     proxyPool.open(px, this.host, this.port, 9000).then((socket) => {
       if (!this.wanted || gen !== this._gen) { try { socket.destroy(); } catch (_) {} return; }
-      proxyPool.reportOk(px);
+      // CONNECT success is only an endpoint probe. Spawn/AFK success later
+      // calls reportOk, which is the only thing that clears failure history.
+      proxyPool.probeOk(px, px.latency);
       this._connectNow(px, socket);
     }).catch((err) => {
       if (!this.wanted || gen !== this._gen) return;
@@ -946,6 +1030,15 @@ class ManagedBot {
     this._pendingAuthText = '';
     this._firstSpawn = true;
     this.loggedIn = false;
+    this._loggedInAt = 0;
+    // Each socket needs a fresh AFK decision. The old socket's end event is
+    // ignored now, so reset here instead of relying on that late event.
+    this._autoAfkSent = false;
+    this._autoAfkAttempts = 0;
+    this._inAfkArena = false;
+    this._tpaPlaceUntil = 0;
+    this._tpaPlacePending = false;
+    this._tpaPlaceFrom = null;
     this.loginAttempts = 0;
     this.switched = false;
     this.lastError = '';
@@ -1003,17 +1096,23 @@ class ManagedBot {
     }
     this.bot = bot;
     guardReconfigPackets(bot);
+    // A bot from an older connect attempt can still emit end/chat/spawn after a
+    // restart. Ignore every event that is not from the current socket; otherwise
+    // its late "end" clears the new session and leaves an orphan logged in.
+    const botGen = this._gen;
+    const live = () => this.bot === bot && botGen === this._gen;
 
     // Join watchdog — a silent hang should retry instead of sitting forever.
     this._watchdog = setTimeout(() => {
-      if (!this.bot || this.connectedAt) return;
+      if (!live() || !this.wanted || this.connectedAt) return;
       this.addLog('warn', 'Join timed out — retrying.');
-      try { this.bot.end(); } catch (_) {}
+      try { bot.end(); } catch (_) {}
     }, 45000);
 
     try {
       if (bot._client && typeof bot._client.on === 'function') {
         bot._client.on('end', () => {
+          if (!live()) return;
           if (this.status === 'online') {
             this.addLog('warn', 'Socket closed by the server — reconnecting.');
             this.setStatus('reconnecting', 'Connection lost');
@@ -1023,6 +1122,7 @@ class ManagedBot {
     } catch (_) {}
 
     bot.on('spawn', () => {
+      if (!live()) return;
       const firstSpawn = this._firstSpawn;
       this._firstSpawn = false;
       this.connectedAt = this.connectedAt || now();
@@ -1081,43 +1181,50 @@ class ManagedBot {
     });
 
     bot.on('death', () => {
+      if (!live()) return;
       this.addLog('warn', 'Bot died — respawning.');
     });
 
     bot.on('kicked', (reason) => {
+      if (!live()) return;
       this._sawKick = true;
       this._lastKick = chatText(reason) || stripColor(String(reason || ''));
       this.addLog('warn', `Kicked by server: ${this._lastKick.slice(0, 300)}`);
     });
 
-    bot.on('messagestr', (message, position, original, sender) => this._onMessage(message, original, sender));
+    bot.on('messagestr', (message, position, original, sender) => {
+      if (live()) this._onMessage(message, original, sender);
+    });
 
     bot.on('whisper', (username, message) => {
+      if (!live()) return;
       this.addLog('chat', `[whisper] ${username}: ${message}`);
     });
 
     bot.on('death', () => {
+      if (!live()) return;
       this.addLog('warn', 'Bot died — respawning automatically.');
       this._refresh(true);
     });
 
-    bot.on('health', () => { this._refresh(); this._maybeEat(); });
+    bot.on('health', () => { if (live()) { this._refresh(); this._maybeEat(); } });
 
     // AFK GUIs: some servers open a chest-style menu shortly after /afk.
     // When armed (see sendChat), click its first slot automatically.
-    bot.on('windowOpen', (window) => this._onWindowOpen(window));
+    bot.on('windowOpen', (window) => { if (live()) this._onWindowOpen(window); });
 
     // Sidebar scoreboard updates — keep the panel tracker live.
     ['scoreUpdated', 'scoreRemoved', 'scoreboardTitleChanged', 'scoreboardCreated', 'scoreboardDeleted', 'scoreboardPosition'].forEach((ev) => {
-      try { bot.on(ev, () => this._refresh(true)); } catch (_) {}
+      try { bot.on(ev, () => { if (live()) this._refresh(true); }); } catch (_) {}
     });
 
     // Keep the player count fresh without flooding the console with the
     // server's join/leave spam (NPC shop/auction bots churn constantly).
-    bot.on('playerJoined', () => this._refresh(true));
-    bot.on('playerLeft', () => this._refresh(true));
+    bot.on('playerJoined', () => { if (live()) this._refresh(true); });
+    bot.on('playerLeft', () => { if (live()) this._refresh(true); });
 
     bot.on('kicked', (reason) => {
+      if (!live()) return;
       const r = (chatText(reason) || stripColor(String(reason || ''))).slice(0, 600);
       if (/banned/i.test(r)) {
         const ban = parseBanDuration(r, now());
@@ -1130,7 +1237,7 @@ class ManagedBot {
           // full stated duration (e.g. 3 days) and then auto-reconnect.
           this._permanentBan = ban.permanent;
           this._bannedUntil = ban.until;
-          blockConnectGate(120000);
+          connectGate.block(120000);
           // Some servers send the kick packet but leave the socket open. Close it
           // ourselves so the ban settles immediately instead of looking like a
           // generic join timeout.
@@ -1143,7 +1250,7 @@ class ManagedBot {
         const wait = steps[Math.min(this._throttleHits - 1, steps.length - 1)] + Math.floor(Math.random() * 45000);
         this._rateLimitedUntil = now() + wait;
         // Keep the entire fleet quiet too — every extra attempt extends the block.
-        blockConnectGate(wait);
+        connectGate.block(wait);
       }
       const short = r.length > 220 ? r.slice(0, 217) + '…' : r;
       // Velocity sometimes drops a healthy session with this generic backend
@@ -1168,6 +1275,7 @@ class ManagedBot {
     });
 
     bot.on('error', (err) => {
+      if (!live()) return;
       const code = err && err.code;
       const msg = clean((err && err.message) || err, 300);
       this.lastError = msg;
@@ -1183,6 +1291,8 @@ class ManagedBot {
     });
 
     bot.on('end', (reason) => {
+      // A stale socket ending must not clear or reconnect the live session.
+      if (!live()) return;
       this._clearTimers();
       this._stopAfk();
       this._verifying = false;
@@ -1242,6 +1352,9 @@ class ManagedBot {
       // arena walk instead of inheriting the previous session's "already sent".
       this._autoAfkSent = false;
       this._autoAfkAttempts = 0;
+      this._stopTpaRestore();
+      this._clearTpaPlaceTimer();
+      this._tpaPlacePending = false;
       this.emit();
 
       if (!this.wanted) {
@@ -1288,8 +1401,9 @@ class ManagedBot {
         // Politely wait out the limiter instead of feeding it.
         delay = (this._rateLimitedUntil - now()) + Math.floor(Math.random() * 15000);
       } else {
-        const steps = [8000, 15000, 30000, 60000, 120000, 300000];
-        delay = steps[Math.min(this._retries - 1, steps.length - 1)] + Math.floor(Math.random() * 4000);
+        // Dead routes are retired by the pool; a long sleep here only keeps a
+        // wanted bot offline. Retry with a fresh route every ~30s at most.
+        delay = routeRetryDelay(this._retries) + Math.floor(Math.random() * 3000);
       }
       if (this._guardKicked) delay = Math.max(delay, 30000);
       this._scheduleReconnect(delay);
@@ -1344,6 +1458,7 @@ class ManagedBot {
     const cmd = `/tpaaccept ${TPA_PLAYER}`;
     try {
       this.sendChat(cmd);
+      this._armTpaPlacement('incoming tpahere');
       this.addLog('info', 'TPA: waiting for the confirmation GUI to click Confirm.');
     } catch (e) {
       this._tpaClickUntil = 0;
@@ -1390,6 +1505,144 @@ class ManagedBot {
     return best.score >= 3 || looksTpa ? best.slot : null;
   }
 
+  // ── placing the bot at RO0MII's spot with /tpa ──
+  // The server sends every reconnecting bot to spawn, and the bots cannot use
+  // /sethome, /home or /back. A spot reached by TPA is therefore learned here
+  // and restored by asking RO0MII again; /afk would only return to spawn.
+  _clearTpaPlaceTimer() {
+    if (this._tpaPlaceTimer) { clearInterval(this._tpaPlaceTimer); this._tpaPlaceTimer = null; }
+  }
+
+  _tpaPlayerOnline() {
+    const players = this.bot && this.bot.players ? Object.values(this.bot.players) : [];
+    return players.some((p) => p && tpaNorm(String(p.username || p.displayName || '')).toLowerCase() === TPA_PLAYER.toLowerCase());
+  }
+
+  _armTpaPlacement(reason) {
+    const fromPos = this.bot && this.bot.entity ? this.bot.entity.position : null;
+    this._tpaPlaceFrom = fromPos ? { x: fromPos.x, y: fromPos.y, z: fromPos.z } : null;
+    this._tpaPlaceUntil = now() + 45000;
+    this._tpaPlacePending = false;
+    this._tpaPlaceIsRestore = false;
+    this._clearTpaPlaceTimer();
+    this.addLog('info', `TPA: watching for the landing spot (${reason}).`);
+    const from = this._tpaPlaceFrom;
+    this._tpaPlaceTimer = setInterval(() => {
+      if (now() > this._tpaPlaceUntil) { this._clearTpaPlaceTimer(); return; }
+      if (!this.bot || !this.bot.entity || !this.bot.entity.position) return;
+      const p = this.bot.entity.position;
+      // Chat confirmation is preferred, but a large position jump is proof
+      // too when the server skips the "teleported successfully" message.
+      const moved = from ? Math.hypot(p.x - from.x, p.z - from.z) : 0;
+      const changedY = from ? Math.abs(p.y - from.y) : 0;
+      if (moved > 3 || changedY > 3) this._onTpaTeleport('position jump');
+    }, 1000);
+    if (this._tpaPlaceTimer.unref) this._tpaPlaceTimer.unref();
+  }
+
+  _onTpaTeleport(reason) {
+    if (this._tpaPlacePending) return;
+    this._tpaPlacePending = true;
+    this._clearTpaPlaceTimer();
+    this._cancelAfkSequence();
+    if (this._autoAfkRetryTimer) { clearInterval(this._autoAfkRetryTimer); this._autoAfkRetryTimer = null; }
+    // A TPA landing is not an /afk arena teleport: never start the walk.
+    this._afkSequence = { armedAt: now(), teleported: true, walked: true, tpa: true };
+    this._autoAfkSent = true;
+    this._autoAfkAttempts = 3;
+    const wasRestore = this._tpaPlaceIsRestore;
+    this.addLog('ok', `TPA: landing at ${TPA_PLAYER}'s spot confirmed (${reason}) — checking the position.`);
+    this._later(() => {
+      if (!this.bot || !this.bot.entity || !this.bot.entity.position) return;
+      const p = this.bot.entity.position;
+      if (![p.x, p.y, p.z].every(Number.isFinite)) return;
+      const spot = `${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}`;
+      const h = this._arenaHome;
+      const matchesSaved = h && Math.hypot(p.x - h.x, p.z - h.z) <= 3 && Math.abs(p.y - h.y) <= 3;
+      if (wasRestore && !matchesSaved) {
+        // RO0MII has moved since the spot was saved. Keep the saved spot and
+        // retry later when RO0MII is back there; a fresh manual /tpa can still
+        // teach the bot a new spot.
+        this._tpaPlacePending = false;
+        this._tpaPlaceUntil = 0;
+        this.addLog('warn', `TPA restore landed at ${spot}, not the saved spot ${h ? `${h.x.toFixed(1)},${h.z.toFixed(1)}` : 'unknown'} — keeping the saved spot.`);
+        return;
+      }
+      this._stopTpaRestore();
+      this._arenaHome = { x: p.x, y: p.y, z: p.z };
+      this._arenaHomePlaced = true;
+      this._inAfkArena = true;
+      this._tpaPlacePending = false;
+      this._tpaPlaceUntil = 0;
+      this.setStatus('online', 'AFK arena');
+      this.addLog('ok', `TPA spot saved: ${spot}. Reconnects will ask ${TPA_PLAYER} to place the bot here again.`);
+      try { if (this.hooks && this.hooks.save) this.hooks.save(); } catch (_) {}
+      this.emit();
+    }, 1800);
+  }
+
+  _stopTpaRestore() {
+    if (this._tpaRestoreTimer) { clearInterval(this._tpaRestoreTimer); this._tpaRestoreTimer = null; }
+    this._awaitingTpaRestore = false;
+  }
+
+  _startTpaRestore() {
+    if (!this.autoAfk || !this.wanted || !this.bot || !this.bot.player) return;
+    const p = this.bot && this.bot.entity ? this.bot.entity.position : null;
+    if (!savedSpotNeedsTpa(this._arenaHome, p, this._arenaHomePlaced)) {
+      if (this._atLearnedArena()) this._stayAtLearnedArena();
+      return;
+    }
+    if (this._tpaRestoreTimer) return;
+    this._tpaRestoreLoggedAt = 0;
+    this._awaitingTpaRestore = true;
+    const h = this._arenaHome;
+    this.addLog('warn', `AFK spot ${h.x.toFixed(1)},${h.z.toFixed(1)} is not this session's position — waiting for ${TPA_PLAYER}'s "onna" to send /tpa; /afk skipped.`);
+    this.setStatus('online', `Waiting for ${TPA_PLAYER}'s onna`);
+    // Only watch for the user placing the bot manually or through the queue.
+    // Reconnect itself must never send an outgoing /tpa.
+    this._tpaRestoreTimer = setInterval(() => this._checkTpaRestore(), 30000);
+    if (this._tpaRestoreTimer.unref) this._tpaRestoreTimer.unref();
+  }
+
+  _checkTpaRestore() {
+    if (!this.wanted || !this.bot || !this.bot.player) return;
+    if (this._atLearnedArena()) {
+      this._stopTpaRestore();
+      this._stayAtLearnedArena();
+      this.addLog('ok', 'TPA restore: bot is back at the saved spot — no /tpa needed.');
+      return;
+    }
+    if (now() - this._tpaRestoreLoggedAt > 120000) {
+      this._tpaRestoreLoggedAt = now();
+      this.addLog('info', `TPA restore: still at spawn — waiting for ${TPA_PLAYER}'s "onna" (no automatic /tpa, no /afk).`);
+    }
+  }
+
+  // ── trusted-player chat helpers ──
+  // On 1.21 the messagestr `sender` argument is a UUID, not the player name.
+  // Resolve it from the packet's formatted name (original.with) or the tab
+  // list, and fall back to the visible "<RO0MII> ..." / "RO0MII: ..." prefix.
+  _fromTpaPlayer(raw, original, sender) {
+    const wanted = TPA_PLAYER.toLowerCase();
+    const isWanted = (name) => name && tpaNorm(String(name)).toLowerCase() === wanted;
+    if (original && Array.isArray(original.with)) {
+      for (const entry of original.with) {
+        if (entry && typeof entry.toString === 'function' && isWanted(entry.toString())) return true;
+      }
+    }
+    if (sender && this.bot && this.bot.players) {
+      const player = this.bot.players[sender];
+      if (player && isWanted(player.username)) return true;
+    }
+    return /^\s*(?:<\s*)?RO0MII\s*(?:>|:)/i.test(tpaNorm(raw));
+  }
+
+  // Strip the visible sender prefix so only the message body is compared.
+  _tpaCommandText(raw) {
+    return tpaCommandText(raw);
+  }
+
   // ── auto login ──
   _onMessage(raw, original, sender) {
     const message = stripColor(raw);
@@ -1421,10 +1674,10 @@ class ManagedBot {
     // /tpa RO0MII queue across the AFK-arena bots. An acceptance message
     // advances the queue after the requested cooldown.
     if (manager && manager.tpaQueue) {
-      const fromRoomii = sender
-        ? tpaNorm(sender).toLowerCase() === TPA_PLAYER.toLowerCase()
-        : TPA_SPEAKER_RE.test(message);
-      if (fromRoomii && !TPA_REQUEST_RE.test(tpaNorm(message))) {
+      const fromRoomii = this._fromTpaPlayer(message, original, sender);
+      // Only the exact "onna" message from RO0MII starts the queue — ordinary
+      // chat from that account must never move the bots or send /tpa.
+      if (isTpaQueueTrigger(message, fromRoomii)) {
         startTpaQueue(this);
       }
       if (manager.tpaQueue.active &&
@@ -1433,10 +1686,25 @@ class ManagedBot {
       }
     }
 
+    // A TPA landing is the user's chosen spot, not an /afk arena teleport.
+    // Save the post-teleport position and never start the arena walk for it.
+    const tpaText = tpaNorm(message);
+    if (this._tpaPlaceUntil > now() && !this._tpaPlacePending) {
+      if (isTpaTeleportProof(tpaText)) {
+        this._onTpaTeleport('teleport message');
+      } else if (isTpaAcceptance(tpaText)) {
+        // Acceptance alone can arrive before the server moves the player. Keep
+        // watching for the position jump instead of saving the old coordinates.
+        this._tpaPlaceUntil = Math.max(this._tpaPlaceUntil, now() + 30000);
+        this.addLog('info', `TPA: ${TPA_PLAYER} accepted — waiting for the landing position.`);
+      }
+    }
+
     // Server announcement confirming the arena teleport (ignore player chat).
     // Accept it even if the GUI/click sequence was missed: the teleport text
     // itself is proof the bot is in the arena and must do its one short walk.
     if (this.autoAfk && this.status === 'online' && this._autoAfkSent &&
+        !this._tpaPlacePending && this._tpaPlaceUntil <= now() &&
         (!this._afkSequence || (!this._afkSequence.teleported && !this._afkSequence.walked)) &&
         /\b(?:afk[ -]?arena|teleported successfully|teleport(?:ed)? to (?:the )?afk)\b/i.test(message) &&
         !/^[A-Za-z0-9_.]{1,16}\s*:/.test(message)) {
@@ -1519,6 +1787,7 @@ class ManagedBot {
       if (!this.wanted || !this.bot || !this.bot.player || this.loggedIn) return;
       if (this._lastPromptAt > sentAt) return; // a new prompt arrived — keep retrying
       this.loggedIn = true;
+      this._loggedInAt = now();
       this._loginGaveUp = false;
       this.addLog('info', 'No further login prompt — assuming authentication succeeded.');
       this._afterLogin();
@@ -1528,6 +1797,7 @@ class ManagedBot {
   _loginSuccess(via) {
     if (this.loggedIn) return;
     this.loggedIn = true;
+    this._loggedInAt = now();
     this.loginAttempts = 0;
     this._loginGaveUp = false;
     if (this._loginRetry) { clearTimeout(this._loginRetry); this._loginRetry = null; }
@@ -1718,6 +1988,11 @@ class ManagedBot {
       this._tpaClickUntil = now() + 30000;
       this.addLog('info', 'TPA armed — the Confirm glass in the GUI that opens will be clicked automatically.');
     }
+    // Outgoing /tpa RO0MII (queue or panel) is how the user places the bot at
+    // a specific spot. Learn the landing position when it completes.
+    if (/^\/tpa\b/i.test(msg) && tpaNorm(msg).toLowerCase().includes(TPA_PLAYER.toLowerCase())) {
+      this._armTpaPlacement('outgoing /tpa');
+    }
   }
 
   _onWindowOpen(window) {
@@ -1883,9 +2158,23 @@ class ManagedBot {
     // not the teleport-time snapshot — that snapshot was ~596 blocks away in
     // the lobby and produced fake "596 blocks from spawn" walk results.
     const origin = { x: p.x, y: p.y, z: p.z };
-    // Auto-learn the arena home here — after the settle delay the player is
-    // really in the arena, unlike the early teleport-announcement snapshot.
-    this._arenaHome = { x: origin.x, y: origin.y, z: origin.z };
+    // A saved spot is reused: after the next /afk teleport the bot walks back
+    // to where the user left it instead of taking a new random direction from
+    // spawn. Only a spot inside this arena is valid.
+    const h = this._arenaHome;
+    const usableHome = h && Number.isFinite(h.x) && Number.isFinite(h.z) &&
+      Math.abs(h.x - origin.x) <= 20 && Math.abs(h.z - origin.z) <= 20 &&
+      Math.abs((h.y || origin.y) - origin.y) <= 10 &&
+      !(Math.abs(h.x - origin.x) < 1 && Math.abs(h.z - origin.z) < 1);
+    const returnTarget = usableHome
+      ? { x: Math.floor(h.x), y: Math.floor(h.y || origin.y), z: Math.floor(h.z) }
+      : null;
+    if (!usableHome) {
+      // No saved spot yet: learn the spawn position and let the walk choose a
+      // fresh place. The final position is saved after the walk below.
+      this._arenaHome = { x: origin.x, y: origin.y, z: origin.z };
+      try { if (this.hooks && this.hooks.save) this.hooks.save(); } catch (_) {}
+    }
     this._afkWalkOrigin = origin;
     this._afkWalkWaitStarted = 0;
     const token = (this._afkWalkToken || 0) + 1;
@@ -1895,7 +2184,11 @@ class ManagedBot {
     if (this._afkWalkAbort) { try { this._afkWalkAbort.abort(); } catch (_) {} }
     const abort = new AbortController();
     this._afkWalkAbort = abort;
-    this.addLog('info', `AFK arena: mapping the arena and choosing one random ${AFK_WALK_MIN}–${AFK_WALK_MAX} block walk (walking only)…`);
+    if (returnTarget) {
+      this.addLog('info', `AFK arena: returning to saved spot ${returnTarget.x},${returnTarget.z} (walking only)…`);
+    } else {
+      this.addLog('info', `AFK arena: mapping the arena and choosing one random ${AFK_WALK_MIN}–${AFK_WALK_MAX} block walk (walking only)…`);
+    }
     this._afkWalkDeadline = now() + 60000;
     const route = this.proxy;
 
@@ -1904,6 +2197,7 @@ class ManagedBot {
     // look blocked, and a blocked bot jumps/strafes/re-routes instead of
     // standing still (or turning in place) until the timeout.
     runArenaWalk(b, {
+      target: returnTarget,
       minDistance: AFK_WALK_MIN,
       maxDistance: AFK_WALK_MAX,
       sneak: AFK_WALK_SNEAK,
@@ -1924,6 +2218,13 @@ class ManagedBot {
       const travelled = Math.max(result.moved || 0, result.walked || 0);
       if (result.ok) {
         if (route) proxyPool.reportOk(route);
+        if (!returnTarget && b.entity && b.entity.position) {
+          const end = b.entity.position;
+          if (Math.abs(end.x - origin.x) <= 20 && Math.abs(end.z - origin.z) <= 20) {
+            this._arenaHome = { x: end.x, y: end.y, z: end.z };
+            try { if (this.hooks && this.hooks.save) this.hooks.save(); } catch (_) {}
+          }
+        }
         this._finishAfkWalk(`${travelled.toFixed(1)} blocks walked — target reached`);
       } else {
         // A route that cannot complete the one walk is not fit for the AFK
@@ -2060,6 +2361,8 @@ function loadStore() {
           id: b.id,
           createdAt: b.createdAt || now(),
           desiredOn: !!b.desiredOn,
+          arenaHome: b.arenaHome,
+          arenaHomePlaced: !!b.arenaHomePlaced,
         });
       } catch (_) {
         return null;
@@ -2301,9 +2604,14 @@ function broadcastGroups() {
 // auto-learned AFK arena take part, in dashboard order.
 function tpaQueueBots() {
   if (!manager) return [];
-  return Array.from(manager.bots.values()).filter((b) =>
-    b.wanted && b.status === 'online' && b.loggedIn && b.autoAfk && b._inAfkArena
-  );
+  return Array.from(manager.bots.values()).filter((b) => isTpaQueueBot({
+    wanted: b.wanted,
+    status: b.status,
+    loggedIn: b.loggedIn,
+    autoAfk: b.autoAfk,
+    inArena: b._inAfkArena,
+    awaitingRestore: b._awaitingTpaRestore,
+  }));
 }
 
 function startTpaQueue(triggerBot) {
@@ -2340,15 +2648,26 @@ function runTpaQueueStep() {
   }
   const bot = manager.bots.get(q.ids[q.index]);
   q.index += 1;
-  if (!bot || bot.status !== 'online' || !bot.loggedIn || !bot._inAfkArena) {
-    if (bot) bot.addLog('warn', 'TPA queue: skipped — not in AFK arena.');
+  if (!bot || !isTpaQueueBot({
+    wanted: bot.wanted,
+    status: bot.status,
+    loggedIn: bot.loggedIn,
+    autoAfk: bot.autoAfk,
+    inArena: bot._inAfkArena,
+    awaitingRestore: bot._awaitingTpaRestore,
+  })) {
+    if (bot) bot.addLog('warn', 'TPA queue: skipped — not an arena bot right now.');
     clearTimeout(q.timer);
     q.timer = setTimeout(runTpaQueueStep, 400);
     return;
   }
-  bot.addLog('ok', `TPA queue [${q.index}/${q.ids.length}]: sending /tpa ${q.target}.`);
+  const restoring = !!bot._awaitingTpaRestore;
+  bot.addLog('ok', `TPA queue [${q.index}/${q.ids.length}]: sending /tpa ${q.target}${restoring ? ' to restore the saved spot' : ''}.`);
   try {
     bot.sendChat(`/tpa ${q.target}`);
+    // A restore must land on the saved spot; otherwise the landing would
+    // silently teach the bot RO0MII's current position instead.
+    if (restoring) bot._tpaPlaceIsRestore = true;
   } catch (e) {
     bot.addLog('err', `TPA queue: /tpa failed: ${e.message || e}`);
   }
